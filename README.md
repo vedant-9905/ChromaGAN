@@ -115,4 +115,4 @@ npm install
 npm run dev
 ```
 
-- Radiologist Workstation: `http://localhost:3000`
+- Radiologist Workstation: `http://localhost:3003`
