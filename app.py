@@ -1,139 +1,135 @@
 """
 app.py
 ======
-ChromaGAN — Minimalist AI Photo Colorizer
-Upload ➔ Compare with Slider ➔ Download Color Photo
+ChromaGAN — Precision AI Photo Colorizer
+Powered by Pre-Trained Deep Neural Colorization (Zhang et al. ECCV / SIGGRAPH)
+Minimalist Workflow: Upload ➔ Interactive Split-Slider ➔ Download Color Image
 """
 
 from __future__ import annotations
 
 import os
-import cv2
+import sys
 import numpy as np
 import torch
-import gradio as gr
 from PIL import Image
+import gradio as gr
+from skimage import color
 
-from core.models import UNetColorGenerator
-from core.inference import INFERENCE_SIZE
+# Add core to module search path
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+from core.colorizers import siggraph17, eccv16, preprocess_img, postprocess_tens
 
 # ---------------------------------------------------------------------------
-# Model Setup
+# Pre-Trained SOTA Neural Network Initialization
 # ---------------------------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-generator = UNetColorGenerator(in_channels=1, out_channels=2, base_filters=64)
-generator.to(device)
-generator.eval()
+print(f"[ChromaGAN] Loading pre-trained precision colorizer model on {device}...")
 
-OUTPUT_PATH = "colorized_photo.png"
+# Load pre-trained SIGGRAPH 2017 deep neural colorizer
+colorizer = siggraph17(pretrained=True).eval()
+colorizer.to(device)
+print("[ChromaGAN] Pre-trained neural colorizer ready.")
+
+OUTPUT_FILE = "colorized_photo.png"
 
 
 # ---------------------------------------------------------------------------
-# Colorization Logic
+# Precision Colorization Pipeline
 # ---------------------------------------------------------------------------
 
-def colorize_image(input_image: np.ndarray | None):
+def colorize_photo(input_image: np.ndarray | None):
     """
-    Takes an input image, restores natural colors using CIELAB cGAN,
-    and returns a before/after tuple for the split-slider plus a download file path.
+    Ingests an input photograph (RGB/Grayscale numpy array),
+    extracts the luminance L channel, and uses the pre-trained deep neural network
+    to synthesize accurate (a, b) chrominance channels matching commercial precision.
     """
     if input_image is None:
         return None, gr.update(visible=False, value=None)
 
-    orig_h, orig_w = input_image.shape[:2]
+    # If grayscale, tile to 3 channels for uniform processing
+    if input_image.ndim == 2:
+        img_rgb = np.tile(input_image[:, :, None], 3)
+    else:
+        img_rgb = input_image[:, :, :3]
 
-    # Convert RGB -> BGR -> CIELAB
-    img_bgr = cv2.cvtColor(input_image, cv2.COLOR_RGB2BGR)
-    img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l_channel, _, _ = cv2.split(img_lab)
+    # Preprocess into native L and resized 256x256 L tensor
+    (tens_l_orig, tens_l_rs) = preprocess_img(img_rgb, HW=(256, 256))
+    tens_l_rs = tens_l_rs.to(device)
 
-    # Grayscale original (exact original textures & lighting preserved)
-    bw_original_rgb = cv2.cvtColor(l_channel, cv2.COLOR_GRAY2RGB)
-
-    # Neural prediction on L channel
-    l_resized = cv2.resize(l_channel, (INFERENCE_SIZE, INFERENCE_SIZE), interpolation=cv2.INTER_AREA)
-    l_norm = (l_resized.astype(np.float32) / 127.5) - 1.0
-    l_tensor = torch.from_numpy(l_norm).unsqueeze(0).unsqueeze(0).to(device)
-
+    # Neural inference
     with torch.no_grad():
-        ab_pred = generator(l_tensor)
+        out_ab = colorizer(tens_l_rs).cpu()
 
-    ab_np = ab_pred.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    a_pred = cv2.resize(ab_np[:, :, 0], (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
-    b_pred = cv2.resize(ab_np[:, :, 1], (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
+    # Recombine in CIELAB space and convert to sRGB
+    out_rgb = postprocess_tens(tens_l_orig, out_ab)
+    colorized_u8 = (np.clip(out_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-    # Natural vibrancy boost
-    a_pred = a_pred * 1.30
-    b_pred = b_pred * 1.30
+    # Grayscale original (exact original luminance and textures)
+    l_orig_np = tens_l_orig.squeeze().cpu().numpy()
+    bw_u8 = (np.clip(l_orig_np / 100.0, 0.0, 1.0) * 255.0).astype(np.uint8)
+    bw_rgb = np.stack([bw_u8, bw_u8, bw_u8], axis=-1)
 
-    a_u8 = np.clip((a_pred * 127.0) + 128.0, 0, 255).astype(np.uint8)
-    b_u8 = np.clip((b_pred * 127.0) + 128.0, 0, 255).astype(np.uint8)
+    # Save high-resolution PNG for download
+    Image.fromarray(colorized_u8).save(OUTPUT_FILE, format="PNG", quality=98)
 
-    # Recombine in CIELAB space and convert to RGB
-    colorized_lab = cv2.merge([l_channel, a_u8, b_u8])
-    colorized_bgr = cv2.cvtColor(colorized_lab, cv2.COLOR_LAB2BGR)
-    colorized_rgb = cv2.cvtColor(colorized_bgr, cv2.COLOR_BGR2RGB)
-
-    # Save for download
-    Image.fromarray(colorized_rgb).save(OUTPUT_PATH, quality=95)
-
-    return (bw_original_rgb, colorized_rgb), gr.update(visible=True, value=OUTPUT_PATH)
+    # Return slider tuple: (B&W Original, Colorized Output) and download path
+    return (bw_rgb, colorized_u8), gr.update(visible=True, value=OUTPUT_FILE)
 
 
 # ---------------------------------------------------------------------------
-# Minimalist UI
+# Ultra-Minimalist UI
 # ---------------------------------------------------------------------------
 
 custom_css = """
-/* Minimalist Clean Design */
 .gradio-container {
-    max-width: 980px !important;
+    max-width: 960px !important;
     margin: 0 auto !important;
-    padding: 24px 16px !important;
+    padding: 32px 16px !important;
 }
 .header-box {
     text-align: center;
-    margin-bottom: 24px;
+    margin-bottom: 28px;
 }
 .header-title {
-    font-size: 32px;
+    font-size: 34px;
     font-weight: 800;
     letter-spacing: -0.03em;
     margin-bottom: 6px;
-    background: linear-gradient(135deg, #a78bfa 0%, #38bdf8 100%);
+    background: linear-gradient(135deg, #818cf8 0%, #38bdf8 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 .header-sub {
     font-size: 15px;
     color: #94a3b8;
-    margin-bottom: 0;
+    margin: 0;
 }
 """
 
 theme = gr.themes.Soft(
-    primary_hue="violet",
+    primary_hue="indigo",
     secondary_hue="cyan",
     neutral_hue="slate",
     font=[gr.themes.GoogleFont("Inter"), "system-ui", "sans-serif"],
 )
 
-with gr.Blocks(title="Photo Colorizer") as demo:
+with gr.Blocks(title="AI Photo Colorizer") as demo:
     # Header
     gr.HTML(
         """
         <div class="header-box">
-            <h1 class="header-title">Photo Colorizer</h1>
-            <p class="header-sub">Upload an old black & white photograph to instantly restore natural colors.</p>
+            <h1 class="header-title">AI Photo Colorizer</h1>
+            <p class="header-sub">Upload an old black & white photograph to instantly restore natural, realistic colors.</p>
         </div>
         """
     )
 
-    # Upload + Colorize
+    # Upload & Action
     with gr.Row():
         upload_input = gr.Image(
-            label="Upload Old Photo",
+            label="Upload B&W Photo",
             type="numpy",
             sources=["upload", "clipboard"],
             height=280,
@@ -142,12 +138,12 @@ with gr.Blocks(title="Photo Colorizer") as demo:
     with gr.Row():
         colorize_btn = gr.Button("🎨 Colorize Photo", variant="primary", size="lg")
 
-    # Before / After Split-Slider
+    # Interactive Before/After Split-Slider
     with gr.Row():
         slider_output = gr.ImageSlider(
-            label="Original (Left) vs. Colorized (Right) — Drag Divider to Compare",
+            label="Before (B&W) vs. After (Color) — Drag Divider to Compare",
             type="numpy",
-            height=500,
+            height=520,
             interactive=True,
         )
 
@@ -155,34 +151,35 @@ with gr.Blocks(title="Photo Colorizer") as demo:
     with gr.Row():
         download_btn = gr.DownloadButton(
             "⬇️ Download Color Photo",
-            variant="secondary",
+            variant="primary",
             size="lg",
             visible=False,
         )
 
-    # Quick Samples
+    # Quick Samples Gallery
     gr.Markdown("#### Quick Samples")
     examples = gr.Examples(
         examples=[
+            ["assets/samples/ansel_adams3.jpg"],
+            ["assets/samples/ansel_adams2.jpg"],
             ["assets/samples/classic_portrait.png"],
             ["assets/samples/vintage_car.png"],
             ["assets/samples/old_city.png"],
-            ["assets/samples/yosemite_landscape.png"],
         ],
         inputs=[upload_input],
         outputs=[slider_output, download_btn],
-        fn=colorize_image,
+        fn=colorize_photo,
         cache_examples=False,
     )
 
-    # Interactions
+    # Wire Interactions
     colorize_btn.click(
-        fn=colorize_image,
+        fn=colorize_photo,
         inputs=[upload_input],
         outputs=[slider_output, download_btn],
     )
     upload_input.change(
-        fn=colorize_image,
+        fn=colorize_photo,
         inputs=[upload_input],
         outputs=[slider_output, download_btn],
     )
