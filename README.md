@@ -1,4 +1,4 @@
-# ChromaGAN: AI Black & White Photo Colorizer & Vintage Restorer
+# 🎨 ChromaGAN: AI Black & White Photo Colorizer & Vintage Restorer
 
 An intuitive, real-time photo restoration and colorization studio powered by a Conditional Generative Adversarial Network (cGAN / Pix2Pix). ChromaGAN ingests black-and-white, grayscale, and vintage archival photographs, maps luminance ($L$) to chromatic distribution ($a, b$) in the CIELAB color space, and synthesizes natural, vibrant, and historically authentic colors with zero color bleeding.
 
@@ -48,11 +48,12 @@ An intuitive, real-time photo restoration and colorization studio powered by a C
 
 ---
 
-## Key Advantages of the CIELAB GAN Formulation
+## Tech Stack (AI/ML Industry Standard)
 
-1. **Zero Hallucination of Geometry**: Because luminance $L$ is passed directly through from the original photograph, light, shadows, textures, and edges remain 100% faithful to the historical original.
-2. **Dedicated Chromatic Learning**: The network solves a 2-channel prediction task $(a, b)$ instead of an unconstrained 3-channel RGB synthesis task, eliminating color bleeding and desaturation artifacts.
-3. **Instant Visual Impact**: Transforms 100-year-old archival photos into rich, authentic modern color images.
+- **Deep Learning Framework**: PyTorch 2.14+, TorchVision
+- **Computer Vision & Colorimetry**: OpenCV-Python, NumPy, Pillow
+- **Interactive Workstation**: Gradio 6 (Hugging Face)
+- **Mathematical Color Space**: CIELAB ($L \in [0, 100]$, $a \in [-128, 127]$, $b \in [-128, 127]$)
 
 ---
 
@@ -60,60 +61,44 @@ An intuitive, real-time photo restoration and colorization studio powered by a C
 
 ```
 ChromaGAN/
-├── PLAN.md                     # Architecture specification & roadmap
-├── README.md                   # System guide and startup instructions
-├── backend/
-│   ├── core/
-│   │   ├── __init__.py         # Core package exports
-│   │   ├── models.py           # UNetColorGenerator & PatchGANColorDiscriminator
-│   │   ├── losses.py           # Conditional adversarial and L1 chrominance loss
-│   │   └── inference.py        # CIELAB color conversion, style grades, metrics
-│   ├── main.py                 # FastAPI endpoints: POST /api/colorize, GET /api/health
-│   ├── requirements.txt        # Backend dependencies
-│   └── README.md
-└── frontend/
-    ├── app/
-    │   ├── globals.css         # Studio dark-mode styles, scanlines, range sliders
-    │   ├── layout.tsx          # Root layout and metadata
-    │   └── page.tsx            # ChromaGAN studio main workstation
-    ├── components/
-    │   ├── Header.tsx          # Studio status HUD, metrics display, export HD button
-    │   ├── Sidebar.tsx         # Upload, historical presets, color styles, saturation
-    │   ├── SplitSlider.tsx     # Draggable interactive split before/after inspector
-    │   ├── SideBySideGrid.tsx  # Tri-view studio (Input, Colorized, Chromatic Heatmap)
-    │   └── SamplePresets.ts    # Procedural vintage B&W photo generator
-    ├── types/
-    │   └── index.ts            # TypeScript interfaces
-    ├── package.json            # Configured for Port 3003
-    ├── tailwind.config.ts
-    └── next.config.js
+├── app.py                # Main Gradio 6 application (Port 3003)
+├── core/
+│   ├── __init__.py       # Core package exports
+│   ├── models.py         # UNetColorGenerator & PatchGANColorDiscriminator
+│   ├── losses.py         # cGAN Adversarial & L1 Chrominance Losses
+│   └── inference.py      # CIELAB color conversion, Hasler-Süsstrunk metric
+├── assets/
+│   └── samples/          # Historical sample photographs (Portrait, Car, City, Landscape)
+├── create_samples.py     # Script to generate sample B&W presets
+├── requirements.txt      # Clean pinned Python dependencies
+├── PLAN.md               # Architecture roadmap
+└── README.md             # Project documentation & launch instructions
 ```
 
 ---
 
 ## Quickstart
 
-### 1. Launch Frontend Studio (Port 3003)
-
+### 1. Install Dependencies
 ```bash
-cd frontend
-npm install
-npm run dev
+pip install -r requirements.txt
+```
+
+### 2. Launch ChromaGAN Studio
+```bash
+python app.py
 ```
 
 Open your browser at:
 👉 **[http://localhost:3003](http://localhost:3003)**
 
-### 2. Launch Backend Inference Server (Port 8000)
+---
 
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate       # On Windows
-# source .venv/bin/activate  # On Linux/macOS
-pip install -r requirements.txt
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
+## Key Studio Features
 
-- Interactive Swagger Docs: `http://localhost:8000/docs`
-- Health Check: `http://localhost:8000/api/health`
+- **↔️ Interactive Split Slider**: Draggable before/after divider comparing Grayscale B&W input vs. cGAN Colorized Output in real-time.
+- **🏛️ 1-Click Archival Presets**: Click any thumbnail in the examples gallery to instantly test (1920s Portrait, 1930s Roadster Car, Historic City, Yosemite Lake).
+- **🎨 Color Grading Profiles**: Vibrant Modern, Natural Historic, Warm Golden Hour, Cool Cinematic.
+- **⚡ Chromatic Saturation & Temperature**: Real-time slider controls for fine artistic calibration.
+- **🔥 Turbo Chromatic Heatmap**: Visualizes $(a, b)$ chromatic energy spread across the photograph.
+- **📊 Quantitative Scoreboard**: Displays Hasler & Süsstrunk Colorfulness Index, inference latency (ms), and native pixel matrix.
