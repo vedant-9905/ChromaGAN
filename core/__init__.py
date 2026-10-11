@@ -5,6 +5,8 @@ from core.models import UNetColorGenerator, PatchGANColorDiscriminator
 from core.losses import ChromaGANLoss
 from core.inference import run_colorization, build_generator, compute_colorfulness
 
+from core.pipeline import studio_engine, ChromaGANEngine, PRESETS, export_image
+
 __all__ = [
     "UNetColorGenerator",
     "PatchGANColorDiscriminator",
@@ -12,4 +14,8 @@ __all__ = [
     "run_colorization",
     "build_generator",
     "compute_colorfulness",
+    "studio_engine",
+    "ChromaGANEngine",
+    "PRESETS",
+    "export_image",
 ]

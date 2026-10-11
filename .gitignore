@@ -58,3 +58,9 @@ Thumbs.db
 .env.development.local
 .env.test.local
 .env.production.local
+
+# Runtime generated test images
+colorized_photo.png
+chromagan_master_export.*
+test_colorized.png
+chromagan_studio_export.*

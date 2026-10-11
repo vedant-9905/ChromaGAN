@@ -151,12 +151,6 @@ class SIGGRAPHGenerator(BaseColor):
         conv10_2 = self.model10(conv10_up)
         out_reg = self.model_out(conv10_2)
 
-        conv9_up = self.model9up(conv8_3) + self.model2short9(conv2_2)
-        conv9_3 = self.model9(conv9_up)
-        conv10_up = self.model10up(conv9_3) + self.model1short10(conv1_2)
-        conv10_2 = self.model10(conv10_up)
-        out_reg = self.model_out(conv10_2)
-
         return self.unnormalize_ab(out_reg)
 
 def siggraph17(pretrained=True):
