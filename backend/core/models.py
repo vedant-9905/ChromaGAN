@@ -1,12 +1,9 @@
 """
 core/models.py
 ==============
-Defines the RadSwin-WGAN Generator (Residual U-Net) and
-Discriminator (PatchGAN with Wasserstein head).
-
-Architecture Notes:
-- Generator: ResUNet with skip connections, InstanceNorm, LeakyReLU, Tanh output
-- Discriminator: 70x70 PatchGAN, no final activation (raw scores for WGAN)
+Defines the ChromaGAN architectures:
+1. UNetColorGenerator: U-Net with skip connections mapping Luminance L -> Chrominance (a, b)
+2. PatchGANColorDiscriminator: 70x70 PatchGAN critic scoring real vs generated (L, a, b) pairs
 """
 
 import torch
@@ -14,28 +11,16 @@ import torch.nn as nn
 from typing import List
 
 
-# ---------------------------------------------------------------------------
-# Helper Blocks
-# ---------------------------------------------------------------------------
+class DownBlock(nn.Module):
+    """Conv2d -> BatchNorm/InstanceNorm -> LeakyReLU(0.2)"""
 
-class ConvINLeaky(nn.Module):
-    """Conv2d → InstanceNorm2d → LeakyReLU(0.2)"""
-
-    def __init__(
-        self,
-        in_ch: int,
-        out_ch: int,
-        kernel: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-        use_norm: bool = True,
-    ) -> None:
+    def __init__(self, in_ch: int, out_ch: int, normalize: bool = True) -> None:
         super().__init__()
         layers: List[nn.Module] = [
-            nn.Conv2d(in_ch, out_ch, kernel, stride, padding, bias=not use_norm)
+            nn.Conv2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=not normalize)
         ]
-        if use_norm:
-            layers.append(nn.InstanceNorm2d(out_ch, affine=True))
+        if normalize:
+            layers.append(nn.BatchNorm2d(out_ch))
         layers.append(nn.LeakyReLU(0.2, inplace=True))
         self.block = nn.Sequential(*layers)
 
@@ -43,175 +28,134 @@ class ConvINLeaky(nn.Module):
         return self.block(x)
 
 
-class ResidualBlock(nn.Module):
-    """
-    Identity-shortcut residual block.
-    Conv → IN → LReLU → Conv → IN → (+ skip)
-    """
+class UpBlock(nn.Module):
+    """Upsample -> Conv2d -> BatchNorm -> ReLU -> (optional Dropout)"""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, in_ch: int, out_ch: int, dropout: float = 0.0) -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, 1, 1, bias=False)
-        self.norm1 = nn.InstanceNorm2d(channels, affine=True)
-        self.act = nn.LeakyReLU(0.2, inplace=True)
-        self.conv2 = nn.Conv2d(channels, channels, 3, 1, 1, bias=False)
-        self.norm2 = nn.InstanceNorm2d(channels, affine=True)
+        layers: List[nn.Module] = [
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        ]
+        if dropout > 0.0:
+            layers.append(nn.Dropout(dropout))
+        self.block = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x
-        out = self.act(self.norm1(self.conv1(x)))
-        out = self.norm2(self.conv2(out))
-        return self.act(out + identity)
+        return self.block(x)
 
 
-class UpConvINLeaky(nn.Module):
-    """Bilinear upsample + ConvINLeaky for decoder path."""
-
-    def __init__(self, in_ch: int, out_ch: int) -> None:
-        super().__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-        self.conv = ConvINLeaky(in_ch, out_ch, kernel=3, stride=1, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(self.up(x))
-
-
-# ---------------------------------------------------------------------------
-# Generator: Residual U-Net (ResUNet)
-# ---------------------------------------------------------------------------
-
-class ResUNetGenerator(nn.Module):
+class UNetColorGenerator(nn.Module):
     """
-    Multi-scale Residual U-Net Generator.
-
-    Encoder: 4 downsampling stages (stride-2 convolutions)
-    Bottleneck: 6 residual blocks
-    Decoder: 4 upsampling stages with skip connections (channel-wise concat)
-    Output: Tanh activation for normalized [-1, 1] range
-
-    Args:
-        in_channels  : input image channels (1 for grayscale CT)
-        out_channels : output image channels (1 for grayscale CT)
-        base_filters : base number of feature maps (default 64)
-        n_res_blocks : number of residual blocks in bottleneck (default 6)
+    U-Net Generator for Black & White Photo Colorization.
+    
+    Ingests 1-channel normalized Luminance L in [-1, 1].
+    Outputs 2-channel normalized Chrominance (a, b) in [-1, 1].
+    Skip connections preserve exact high-frequency spatial details from the input photograph.
     """
 
-    def __init__(
-        self,
-        in_channels: int = 1,
-        out_channels: int = 1,
-        base_filters: int = 64,
-        n_res_blocks: int = 6,
-    ) -> None:
+    def __init__(self, in_channels: int = 1, out_channels: int = 2, base_filters: int = 64) -> None:
         super().__init__()
         f = base_filters
 
-        # ---- Encoder ----
-        self.enc1 = nn.Sequential(
-            nn.Conv2d(in_channels, f, 7, 1, 3, bias=False),
-            nn.InstanceNorm2d(f, affine=True),
-            nn.LeakyReLU(0.2, inplace=True),
-        )  # H x W x f
+        # Encoder (Downsampling path)
+        self.down1 = DownBlock(in_channels, f, normalize=False)  # 256 -> 128
+        self.down2 = DownBlock(f, f * 2)                         # 128 -> 64
+        self.down3 = DownBlock(f * 2, f * 4)                     # 64 -> 32
+        self.down4 = DownBlock(f * 4, f * 8)                     # 32 -> 16
+        self.down5 = DownBlock(f * 8, f * 8)                     # 16 -> 8
+        self.down6 = DownBlock(f * 8, f * 8)                     # 8 -> 4
+        self.down7 = DownBlock(f * 8, f * 8)                     # 4 -> 2
+        self.down8 = DownBlock(f * 8, f * 8, normalize=False)    # 2 -> 1 (Bottleneck)
 
-        self.enc2 = ConvINLeaky(f, f * 2, kernel=4, stride=2, padding=1)   # H/2
-        self.enc3 = ConvINLeaky(f * 2, f * 4, kernel=4, stride=2, padding=1)  # H/4
-        self.enc4 = ConvINLeaky(f * 4, f * 8, kernel=4, stride=2, padding=1)  # H/8
+        # Decoder (Upsampling path with skip concatenation)
+        self.up1 = UpBlock(f * 8, f * 8, dropout=0.5)            # 1 -> 2
+        self.up2 = UpBlock(f * 16, f * 8, dropout=0.5)           # 2 -> 4
+        self.up3 = UpBlock(f * 16, f * 8, dropout=0.5)           # 4 -> 8
+        self.up4 = UpBlock(f * 16, f * 8)                        # 8 -> 16
+        self.up5 = UpBlock(f * 16, f * 4)                        # 16 -> 32
+        self.up6 = UpBlock(f * 8, f * 2)                         # 32 -> 64
+        self.up7 = UpBlock(f * 4, f)                             # 64 -> 128
 
-        # ---- Bottleneck ----
-        self.bottleneck = nn.Sequential(
-            *[ResidualBlock(f * 8) for _ in range(n_res_blocks)]
-        )
-
-        # ---- Decoder ----
-        # Each decoder stage receives skip from encoder → in_ch = f*8 + f*8 etc.
-        self.dec4 = UpConvINLeaky(f * 8 + f * 8, f * 4)   # concat with enc4 → f*16→f*4
-        self.dec3 = UpConvINLeaky(f * 4 + f * 4, f * 2)
-        self.dec2 = UpConvINLeaky(f * 2 + f * 2, f)
-        self.dec1 = UpConvINLeaky(f + f, f)
-
-        # ---- Output head ----
-        self.output_conv = nn.Sequential(
-            nn.Conv2d(f, out_channels, 7, 1, 3, bias=True),
-            nn.Tanh(),
+        # Final projection to 2 channels (a, b) at original resolution 256x256
+        self.final_up = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+            nn.Conv2d(f * 2, f, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(f),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.Tanh(),  # Chrominance normalized to [-1, 1]
         )
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.InstanceNorm2d) and m.affine:
-                nn.init.ones_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.normal_(m.weight, mean=1.0, std=0.02)
                 nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Encoder
-        e1 = self.enc1(x)   # f
-        e2 = self.enc2(e1)  # f*2
-        e3 = self.enc3(e2)  # f*4
-        e4 = self.enc4(e3)  # f*8
+    def forward(self, l_channel: torch.Tensor) -> torch.Tensor:
+        # Encoder forward pass with stored skip connections
+        d1 = self.down1(l_channel)
+        d2 = self.down2(d1)
+        d3 = self.down3(d2)
+        d4 = self.down4(d3)
+        d5 = self.down5(d4)
+        d6 = self.down6(d5)
+        d7 = self.down7(d6)
+        d8 = self.down8(d7)
 
-        # Bottleneck
-        b = self.bottleneck(e4)  # f*8
+        # Decoder forward pass with skip connections
+        u1 = self.up1(d8)
+        u2 = self.up2(torch.cat([u1, d7], dim=1))
+        u3 = self.up3(torch.cat([u2, d6], dim=1))
+        u4 = self.up4(torch.cat([u3, d5], dim=1))
+        u5 = self.up5(torch.cat([u4, d4], dim=1))
+        u6 = self.up6(torch.cat([u5, d3], dim=1))
+        u7 = self.up7(torch.cat([u6, d2], dim=1))
 
-        # Decoder with skip connections
-        d4 = self.dec4(torch.cat([b, e4], dim=1))   # f*4
-        d3 = self.dec3(torch.cat([d4, e3], dim=1))  # f*2
-        d2 = self.dec2(torch.cat([d3, e2], dim=1))  # f
-        d1 = self.dec1(torch.cat([d2, e1], dim=1))  # f
-
-        return self.output_conv(d1)
+        # Recombine with first layer and project
+        out = self.final_up(torch.cat([u7, d1], dim=1))
+        return out
 
 
-# ---------------------------------------------------------------------------
-# Discriminator: PatchGAN (70×70 receptive field)
-# ---------------------------------------------------------------------------
-
-class PatchGANDiscriminator(nn.Module):
+class PatchGANColorDiscriminator(nn.Module):
     """
-    PatchGAN Discriminator for WGAN-GP.
-
-    Receptive field ≈ 70×70. No final Sigmoid — outputs raw critic scores
-    suitable for Wasserstein distance estimation.
-
-    Args:
-        in_channels : input channels (1 for single-channel CT)
-        base_filters : base feature map count (default 64)
-        n_layers    : number of downsampling Conv layers after input (default 3)
+    PatchGAN Discriminator (70x70 receptive field).
+    Evaluates joint condition of (L, a, b) to ensure realistic chromatic distribution.
     """
 
-    def __init__(
-        self,
-        in_channels: int = 1,
-        base_filters: int = 64,
-        n_layers: int = 3,
-    ) -> None:
+    def __init__(self, in_channels: int = 3, base_filters: int = 64) -> None:
         super().__init__()
+        f = base_filters
 
-        # Input conv (no normalization on first layer per PatchGAN convention)
-        layers: List[nn.Module] = [
-            nn.Conv2d(in_channels, base_filters, 4, 2, 1, bias=True),
+        self.model = nn.Sequential(
+            # Input: concatenated [L, a, b] -> 3 channels
+            nn.Conv2d(in_channels, f, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
-        ]
 
-        f_prev = base_filters
-        for n in range(1, n_layers + 1):
-            f_curr = min(base_filters * (2 ** n), 512)
-            stride = 1 if n == n_layers else 2
-            layers += [
-                nn.Conv2d(f_prev, f_curr, 4, stride, 1, bias=False),
-                nn.InstanceNorm2d(f_curr, affine=True),
-                nn.LeakyReLU(0.2, inplace=True),
-            ]
-            f_prev = f_curr
+            nn.Conv2d(f, f * 2, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(f * 2),
+            nn.LeakyReLU(0.2, inplace=True),
 
-        # Final projection to single-channel map (no activation)
-        layers.append(nn.Conv2d(f_prev, 1, 4, 1, 1, bias=True))
+            nn.Conv2d(f * 2, f * 4, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(f * 4),
+            nn.LeakyReLU(0.2, inplace=True),
 
-        self.model = nn.Sequential(*layers)
+            nn.Conv2d(f * 4, f * 8, kernel_size=4, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(f * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(f * 8, 1, kernel_size=4, stride=1, padding=1),
+        )
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -220,10 +164,10 @@ class PatchGANDiscriminator(nn.Module):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.InstanceNorm2d) and m.affine:
-                nn.init.ones_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.normal_(m.weight, mean=1.0, std=0.02)
                 nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Returns raw patch-level critic scores (not probabilities)."""
+        """Outputs patch-level real/fake logits."""
         return self.model(x)

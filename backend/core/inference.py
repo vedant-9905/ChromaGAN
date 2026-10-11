@@ -1,264 +1,76 @@
 """
 core/inference.py
 =================
-Production inference pipeline for RadSwin-WGAN Generator.
+Production inference pipeline for ChromaGAN photo colorization.
 
-Handles:
-  - Hounsfield windowing (Lung / Soft Tissue presets)
-  - Min-max intensity normalization to [-1, 1]
-  - Generator forward pass
-  - Output rescaling and residual heatmap generation
-  - Quantitative metrics: PSNR, SSIM
+Converts input photographs to the CIELAB color space, executes
+the U-Net Generator on the luminance channel, synthesizes chrominance (a, b),
+applies user-controlled artistic color grading (saturation, warmth),
+and returns the colorized image, chromatic heatmap, and color metrics.
 """
 
 from __future__ import annotations
 
-import io
 import math
-from pathlib import Path
 from typing import Dict, Optional, Tuple
-
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-from core.models import ResUNetGenerator
+from core.models import UNetColorGenerator
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-WINDOW_PRESETS: Dict[str, Tuple[float, float]] = {
-    "lung":        (-600.0, 1500.0),  # (center-ish, width) → stored as (min_hu, max_hu)
-    "soft_tissue": (-160.0,  240.0),
-    "default":     (-1000.0, 3000.0),
-}
-
-INFERENCE_RESOLUTION: int = 256   # spatial size fed to model
-
-# ---------------------------------------------------------------------------
-# Hounsfield / Intensity Utilities
-# ---------------------------------------------------------------------------
+INFERENCE_SIZE: int = 256
 
 
-def hounsfield_window(
-    arr: np.ndarray,
-    window_min: float,
-    window_max: float,
-) -> np.ndarray:
+def compute_colorfulness(img_bgr: np.ndarray) -> float:
     """
-    Clips a CT array to the HU window and rescales linearly to [0, 1].
-
-    Args:
-        arr        : float32 array of HU values, shape (H, W)
-        window_min : lower HU bound
-        window_max : upper HU bound
-
-    Returns:
-        float32 array clipped & rescaled to [0, 1]
+    Computes image colorfulness based on the Hasler & Süsstrunk (2003) metric:
+    M = sqrt(sigma_rg^2 + sigma_yb^2) + 0.3 * sqrt(mu_rg^2 + mu_yb^2)
+    Higher score indicates rich, diverse chromatic spread.
     """
-    arr = np.clip(arr, window_min, window_max).astype(np.float32)
-    span = window_max - window_min
-    return (arr - window_min) / (span + 1e-8)
+    b, g, r = cv2.split(img_bgr.astype(np.float32))
+    rg = np.abs(r - g)
+    yb = np.abs(0.5 * (r + g) - b)
+
+    std_rg, mean_rg = np.std(rg), np.mean(rg)
+    std_yb, mean_yb = np.std(yb), np.mean(yb)
+
+    std_root = np.sqrt(std_rg ** 2 + std_yb ** 2)
+    mean_root = np.sqrt(mean_rg ** 2 + mean_yb ** 2)
+
+    return float(std_root + (0.3 * mean_root))
 
 
-def minmax_normalize(arr: np.ndarray) -> np.ndarray:
+def generate_chroma_heatmap(a_u8: np.ndarray, b_u8: np.ndarray) -> np.ndarray:
     """
-    Min-max rescale array to [0, 1]; returns as float32.
-    Falls back to all-zeros if std is zero.
+    Computes the chromatic deviation magnitude sqrt((a-128)^2 + (b-128)^2)
+    and maps it to an energetic Jet/Plasma heatmap visualization.
     """
-    arr = arr.astype(np.float32)
-    lo, hi = arr.min(), arr.max()
-    if hi - lo < 1e-8:
-        return np.zeros_like(arr)
-    return (arr - lo) / (hi - lo)
-
-
-def to_model_input(arr_01: np.ndarray, size: int = INFERENCE_RESOLUTION) -> torch.Tensor:
-    """
-    Convert a [0, 1] float32 HxW array to a model-ready tensor.
-    Output: [1, 1, size, size] in [-1, 1].
-    """
-    # Resize
-    resized = cv2.resize(arr_01, (size, size), interpolation=cv2.INTER_LINEAR)
-    # [0,1] → [-1,1]
-    normalized = resized * 2.0 - 1.0
-    # Add batch + channel dims
-    tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0).float()
-    return tensor
-
-
-def from_model_output(tensor: torch.Tensor) -> np.ndarray:
-    """
-    Convert generator output tensor [1, 1, H, W] in [-1, 1] → uint8 [H, W].
-    """
-    arr = tensor.squeeze().cpu().detach().numpy()
-    arr = (arr + 1.0) * 0.5          # [-1,1] → [0,1]
-    arr = np.clip(arr, 0.0, 1.0)
-    return (arr * 255.0).astype(np.uint8)
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
-
-
-def compute_psnr(original: np.ndarray, reconstructed: np.ndarray) -> float:
-    """
-    Computes PSNR between two uint8 images.
-    Returns float in dB; returns 100.0 if images are identical.
-    """
-    o = original.astype(np.float64)
-    r = reconstructed.astype(np.float64)
-    mse = np.mean((o - r) ** 2)
-    if mse < 1e-10:
-        return 100.0
-    return float(20.0 * math.log10(255.0 / math.sqrt(mse)))
-
-
-def compute_ssim_numpy(
-    original: np.ndarray,
-    reconstructed: np.ndarray,
-    window_size: int = 11,
-) -> float:
-    """
-    Computes mean SSIM between two uint8 images using a Gaussian window.
-    Returns scalar in [0, 1].
-    """
-    o = original.astype(np.float64)
-    r = reconstructed.astype(np.float64)
-
-    C1 = (0.01 * 255) ** 2
-    C2 = (0.03 * 255) ** 2
-
-    kernel = cv2.getGaussianKernel(window_size, 1.5)
-    kernel_2d = kernel * kernel.T
-
-    def _filter(img: np.ndarray) -> np.ndarray:
-        return cv2.filter2D(img, -1, kernel_2d)
-
-    mu1 = _filter(o)
-    mu2 = _filter(r)
-    mu1_sq = mu1 ** 2
-    mu2_sq = mu2 ** 2
-    mu12   = mu1 * mu2
-
-    sigma1_sq = _filter(o * o) - mu1_sq
-    sigma2_sq = _filter(r * r) - mu2_sq
-    sigma12   = _filter(o * r) - mu12
-
-    numerator   = (2 * mu12 + C1) * (2 * sigma12 + C2)
-    denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
-
-    ssim_map = numerator / (denominator + 1e-8)
-    return float(np.mean(ssim_map))
-
-
-# ---------------------------------------------------------------------------
-# Heatmap Generation
-# ---------------------------------------------------------------------------
-
-
-def make_residual_heatmap(
-    original_u8: np.ndarray,
-    denoised_u8: np.ndarray,
-) -> np.ndarray:
-    """
-    Computes absolute residual difference and applies Jet colormap.
-
-    Args:
-        original_u8  : HxW uint8 input image
-        denoised_u8  : HxW uint8 denoised image
-
-    Returns:
-        HxW×3 uint8 BGR heatmap suitable for JPEG encoding
-    """
-    diff = np.abs(original_u8.astype(np.int32) - denoised_u8.astype(np.int32))
-    diff_norm = np.clip(diff, 0, 255).astype(np.uint8)
-    # Apply equalization for better visibility
-    diff_eq = cv2.equalizeHist(diff_norm)
-    heatmap = cv2.applyColorMap(diff_eq, cv2.COLORMAP_JET)
+    a_dev = a_u8.astype(np.float32) - 128.0
+    b_dev = b_u8.astype(np.float32) - 128.0
+    magnitude = np.sqrt(a_dev ** 2 + b_dev ** 2)
+    norm = np.clip((magnitude / 100.0) * 255.0, 0, 255).astype(np.uint8)
+    heatmap = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
     return heatmap
 
 
-# ---------------------------------------------------------------------------
-# Weight Initialization (random initialization for demo)
-# ---------------------------------------------------------------------------
+def build_generator(device: torch.device) -> UNetColorGenerator:
+    """Instantiates UNetColorGenerator and initializes weights."""
+    model = UNetColorGenerator(in_channels=1, out_channels=2, base_filters=64)
+    model.to(device)
+    model.eval()
+    return model
 
 
-def build_generator(device: torch.device) -> ResUNetGenerator:
-    """
-    Instantiates the ResUNet generator and moves it to device.
-    Weights are initialized via the model's _init_weights method.
-    In production, call load_weights() after building.
-    """
-    gen = ResUNetGenerator(
-        in_channels=1,
-        out_channels=1,
-        base_filters=64,
-        n_res_blocks=6,
-    )
-    gen.to(device)
-    gen.eval()
-    return gen
-
-
-def load_weights(
-    generator: ResUNetGenerator,
-    checkpoint_path: Path,
-    device: torch.device,
-) -> None:
-    """
-    Loads generator weights from a checkpoint file.
-
-    The checkpoint may be a bare state_dict or a dict with a 'generator'
-    key produced by the training loop.
-
-    Args:
-        generator       : instantiated ResUNetGenerator
-        checkpoint_path : path to .pth file
-        device          : torch device
-    """
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    if isinstance(ckpt, dict) and "generator" in ckpt:
-        state_dict = ckpt["generator"]
-    elif isinstance(ckpt, dict) and "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
-    generator.load_state_dict(state_dict, strict=True)
-    generator.eval()
-
-
-# ---------------------------------------------------------------------------
-# Main Inference Runner
-# ---------------------------------------------------------------------------
-
-
-def run_inference(
+def run_colorization(
     image_bytes: bytes,
-    window_preset: str = "lung",
+    saturation: float = 1.2,
+    color_style: str = "vibrant",  # natural | vibrant | warm_vintage | cool_cinematic
     device: Optional[torch.device] = None,
-    generator: Optional[ResUNetGenerator] = None,
+    generator: Optional[UNetColorGenerator] = None,
 ) -> Dict:
     """
-    End-to-end inference pipeline.
-
-    Args:
-        image_bytes    : raw bytes of a grayscale PNG/JPEG/BMP image
-        window_preset  : HU windowing preset ("lung" | "soft_tissue" | "default")
-        device         : torch device; auto-detects if None
-        generator      : pre-built generator model; built fresh if None
-
-    Returns:
-        dict with keys:
-            original_u8      : HxW uint8 — windowed input
-            denoised_u8      : HxW uint8 — model output
-            heatmap_bgr      : HxW×3 uint8 — residual heatmap (BGR)
-            psnr             : float (dB)
-            ssim             : float [0,1]
-            reconstruction_fidelity : float percentage [0,100]
+    End-to-end CIELAB cGAN photo colorization pipeline.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -266,58 +78,78 @@ def run_inference(
     if generator is None:
         generator = build_generator(device)
 
-    # --- Decode input ---
+    # Decode uploaded image
     nparr = np.frombuffer(image_bytes, np.uint8)
-    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
-
+    img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img_bgr is None:
-        raise ValueError("Failed to decode image bytes. Ensure valid PNG/JPEG/BMP data.")
+        raise ValueError("Failed to decode image. Ensure a valid PNG, JPEG, or BMP file.")
 
-    # Convert to grayscale float32
-    if len(img_bgr.shape) == 3:
-        img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    elif len(img_bgr.shape) == 2:
-        img_gray = img_bgr.astype(np.float32)
-    else:
-        raise ValueError(f"Unexpected image shape: {img_bgr.shape}")
+    orig_h, orig_w = img_bgr.shape[:2]
 
-    # --- Windowing ---
-    window_min, window_max = WINDOW_PRESETS.get(window_preset, WINDOW_PRESETS["default"])
+    # Convert to CIELAB space
+    img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l_channel, _, _ = cv2.split(img_lab)
 
-    # Remap pixel [0,255] to approximate HU range if not DICOM float
-    if img_gray.max() <= 255.0 and img_gray.min() >= 0.0:
-        # Treat pixel values as-is and apply normalization
-        arr_01 = minmax_normalize(img_gray)
-    else:
-        # Genuine HU values
-        arr_01 = hounsfield_window(img_gray, window_min, window_max)
+    # Grayscale original preview image
+    bw_original_bgr = cv2.cvtColor(l_channel, cv2.COLOR_GRAY2BGR)
 
-    # Keep original for metric computation (resized to model size)
-    original_resized = cv2.resize(arr_01, (INFERENCE_RESOLUTION, INFERENCE_RESOLUTION),
-                                  interpolation=cv2.INTER_LINEAR)
-    original_u8 = (original_resized * 255.0).astype(np.uint8)
+    # Resize L channel for neural network processing (256x256)
+    l_resized = cv2.resize(l_channel, (INFERENCE_SIZE, INFERENCE_SIZE), interpolation=cv2.INTER_AREA)
 
-    # --- Model forward pass ---
-    input_tensor = to_model_input(arr_01, size=INFERENCE_RESOLUTION).to(device)
+    # Normalize L channel from [0, 255] to [-1, 1]
+    l_norm = (l_resized.astype(np.float32) / 127.5) - 1.0
+    l_tensor = torch.from_numpy(l_norm).unsqueeze(0).unsqueeze(0).to(device)
 
+    # Forward pass through U-Net Generator
     with torch.no_grad():
-        output_tensor = generator(input_tensor)
+        ab_pred = generator(l_tensor)
 
-    denoised_u8 = from_model_output(output_tensor)
+    # Convert predicted ab tensor [-1, 1] -> numpy
+    ab_pred_np = ab_pred.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    a_pred = ab_pred_np[:, :, 0]
+    b_pred = ab_pred_np[:, :, 1]
 
-    # --- Residual heatmap ---
-    heatmap_bgr = make_residual_heatmap(original_u8, denoised_u8)
+    # Resize predicted ab back to original photograph dimensions
+    a_full = cv2.resize(a_pred, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
+    b_full = cv2.resize(b_pred, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC)
 
-    # --- Metrics ---
-    psnr = compute_psnr(original_u8, denoised_u8)
-    ssim = compute_ssim_numpy(original_u8, denoised_u8)
-    reconstruction_fidelity = max(0.0, min(100.0, ssim * 100.0))
+    # Apply artistic color style presets
+    if color_style == "warm_vintage":
+        # Boost warm yellow-red tones
+        a_full = a_full * 1.1 + 0.05
+        b_full = b_full * 1.25 + 0.12
+    elif color_style == "cool_cinematic":
+        # Shift toward teal & cyan shadows
+        a_full = a_full * 0.95 - 0.05
+        b_full = b_full * 0.85 - 0.10
+    elif color_style == "vibrant":
+        # Expand dynamic range of chrominance
+        a_full = a_full * 1.35
+        b_full = b_full * 1.35
+    else:  # natural
+        a_full = a_full * 1.05
+        b_full = b_full * 1.05
+
+    # Apply user saturation slider
+    a_full = a_full * saturation
+    b_full = b_full * saturation
+
+    # Clip and map back to uint8 [0, 255] for OpenCV LAB (where 128 is neutral gray)
+    a_u8 = np.clip((a_full * 127.0) + 128.0, 0, 255).astype(np.uint8)
+    b_u8 = np.clip((b_full * 127.0) + 128.0, 0, 255).astype(np.uint8)
+
+    # Recombine (L, a, b) and convert to BGR
+    colorized_lab = cv2.merge([l_channel, a_u8, b_u8])
+    colorized_bgr = cv2.cvtColor(colorized_lab, cv2.COLOR_LAB2BGR)
+
+    # Generate colorfulness metric and chromatic heatmap
+    colorfulness_score = compute_colorfulness(colorized_bgr)
+    chroma_heatmap = generate_chroma_heatmap(a_u8, b_u8)
 
     return {
-        "original_u8":            original_u8,
-        "denoised_u8":            denoised_u8,
-        "heatmap_bgr":            heatmap_bgr,
-        "psnr":                   psnr,
-        "ssim":                   ssim,
-        "reconstruction_fidelity": reconstruction_fidelity,
+        "bw_original_bgr": bw_original_bgr,
+        "colorized_bgr": colorized_bgr,
+        "chroma_heatmap": chroma_heatmap,
+        "colorfulness_score": round(colorfulness_score, 2),
+        "resolution": f"{orig_w}x{orig_h}",
     }

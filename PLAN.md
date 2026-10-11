@@ -1,69 +1,75 @@
-# RadSwin-WGAN: Architecture, Implementation & Execution Plan
+# ChromaGAN: AI Black & White Photo Colorizer and Vintage Restorer
 
-## 1. System Overview & Problem Statement
-Restoring high-fidelity anatomical structures from low-dose computed tomography (LDCT) scans while eliminating hallucinated micro-structures and mode collapse using:
-- Multi-scale Residual Generator (ResUNet with identity shortcuts, InstanceNorm, LeakyReLU, Tanh)
-- Wasserstein Discriminator (PatchGAN 70x70 receptive field with 1-Lipschitz gradient penalty $\lambda=10$)
-- Multi-component perceptual & structural objective:
-  $$\mathcal{L}_{total} = \mathcal{L}_{WGAN} + \alpha \mathcal{L}_1 + \beta \mathcal{L}_{SSIM} + \gamma \mathcal{L}_{perceptual}$$
-- Hounsfield windowing (Lung [-600, 1500 HU], Soft Tissue [-160, 240 HU]) and dynamic range normalization.
+## 1. Project Overview & Problem Statement
+**Problem Statement:**
+"To develop an intuitive, real-time photo restoration and colorization studio powered by a Conditional Generative Adversarial Network (cGAN / Pix2Pix). ChromaGAN ingests black-and-white, grayscale, and vintage archival photographs, maps luminance ($L$) to chromatic distribution ($a, b$) in the CIELAB color space, and synthesizes natural, vibrant, and historically authentic colors with zero color bleeding."
+
+### Why this project is 10x better to showcase & understand:
+- **Zero Medical Jargon**: No confusing DICOM, Hounsfield Units, or CT physics.
+- **Instant Visual Impact**: Everyone understands turning an old black-and-white picture into vibrant color.
+- **Industry Standard GAN**: Uses Conditional GAN (Pix2Pix U-Net + PatchGAN) in the CIELAB color space—the exact foundational architecture used in Adobe Photoshop Neural Filters and commercial colorizers.
+- **Fast, Interactive Demo**: 1-click historical presets (1920s vintage car, classic portrait, old city, landscape), split-screen slider, saturation control, and 1-click download.
 
 ---
 
 ## 2. Technical Stack
-- **Backend**: Python 3.11, PyTorch, TorchVision, FastAPI, Uvicorn, OpenCV, NumPy, SciPy, Pydantic.
-- **Frontend**: Next.js 14 (App Router), TypeScript, Tailwind CSS, Lucide-React.
-- **Theme**: Dark medical PACS / workstation aesthetic (`#090D16`, `#0F172A`, cyan/teal accents).
+- **Architecture**: Conditional GAN (cGAN / Pix2Pix in CIELAB space)
+  - **Generator**: U-Net with skip connections (Encoder: 8 downsampling Convs; Decoder: 7 upsampling Convs with skip links)
+  - **Discriminator**: 70×70 PatchGAN Critic
+  - **Losses**: Adversarial GAN Loss + $\mathcal{L}_1$ Chrominance Consistency Loss ($\lambda=100$)
+- **Backend**: Python 3.11, FastAPI, PyTorch, TorchVision, OpenCV-Python, NumPy, Pydantic
+- **Frontend**: Next.js 14 (App Router), TypeScript, Tailwind CSS, Lucide-React (configured on port `3003`)
+- **Theme**: Premium Dark AI Photo Studio (`#0B0F19`, `#121827`, Electric Violet `#8B5CF6`, Cyan `#06B6D4`)
 
 ---
 
-## 3. Implementation Breakdown
+## 3. Directory Layout
+```
+ChromaGAN/
+├── PLAN.md                   # Complete architectural and execution specification
+├── README.md                 # Project documentation and quickstart
+├── backend/
+│   ├── core/
+│   │   ├── __init__.py       # Package exports
+│   │   ├── models.py         # UNetColorGenerator & PatchGANColorDiscriminator
+│   │   ├── losses.py         # cGAN Adversarial Loss & L1 Color Loss
+│   │   └── inference.py      # CIELAB color space converter, colorization pipeline
+│   ├── main.py               # FastAPI endpoints: POST /api/colorize, GET /api/health
+│   ├── requirements.txt      # Dependencies
+│   └── README.md
+└── frontend/
+    ├── app/
+    │   ├── globals.css       # Studio dark theme & slider styles
+    │   ├── layout.tsx        # App layout and metadata
+    │   └── page.tsx          # ChromaGAN Studio main interactive page
+    ├── components/
+    │   ├── Header.tsx        # Studio header, model status, export button
+    │   ├── Sidebar.tsx       # Photo uploader, historical presets, color styles
+    │   ├── SplitSlider.tsx   # Interactive before/after split slider
+    │   ├── SamplePresets.ts  # Historical sample photo generator & presets
+    │   └── SideBySideGrid.tsx# Dual view comparison
+    ├── types/
+    │   └── index.ts          # TypeScript interfaces
+    ├── package.json          # Next.js configured on port 3003
+    ├── tailwind.config.ts
+    └── next.config.js
+```
 
-### Phase 1: Backend Architecture (`/backend`)
-- [x] `backend/core/models.py`:
-  - `ResUNetGenerator`: 4 downsampling stages, 6 residual blocks with identity shortcuts, 4 upsampling stages with skip connections, InstanceNorm, LeakyReLU(0.2), Tanh.
-  - `PatchGANDiscriminator`: 70x70 receptive field, no Sigmoid (Wasserstein critic scores).
-- [x] `backend/core/losses.py`:
-  - `compute_gradient_penalty`: Exact 1-Lipschitz interpolation penalty ($\lambda=10$).
-  - `MSSSIMLoss`: Differentiable multi-scale structural similarity loss.
-  - `VGGPerceptualLoss`: Pre-trained VGG-19 features at `relu5_2`.
-  - `GeneratorLoss`: Combined multi-objective generator loss.
-- [x] `backend/core/inference.py`:
-  - Hounsfield windowing (`lung`, `soft_tissue`, `default`).
-  - Preprocessing and rescaling to $[-1, 1]$.
-  - Generator inference with PyTorch.
-  - Absolute residual difference heatmap with OpenCV Jet colormap.
-  - Quantitative evaluation metrics: PSNR, SSIM, and Reconstruction Fidelity.
-- [x] `backend/main.py`:
-  - Lifespan management for model caching.
-  - `GET /api/health`: System status, active device (CUDA/CPU), GPU model, uptime.
-  - `POST /api/denoise`: Multi-part image ingestion, Hounsfield windowing, model execution, base64 response for input, denoised, heatmap, and metrics.
-  - CORS middleware enabled for `http://localhost:3000`.
-- [x] `backend/requirements.txt`: Pinned dependencies.
+---
 
-### Phase 2: Next.js 14 Frontend (`/frontend`)
-- [ ] Next.js 14 project setup with App Router, TypeScript, and Tailwind CSS.
-- [ ] Top Header:
-  - System badge (Online/Ready/Degraded).
-  - Runtime device indicator (CUDA GPU / CPU).
-  - Quantitative metric badges (PSNR, SSIM, Reconstruction Fidelity, Latency).
-- [ ] Left Radiologist Control Sidebar:
-  - Drag-and-drop DICOM / CT slice uploader with file preview.
-  - Sample presets:
-    - Normal Dose reference
-    - High Poisson/Gaussian Noise
-    - Low-Dose CT Streak / Beam-Hardening Artifacts
-  - Interactive Window Level (WL) and Window Width (WW) sliders with Lung / Soft Tissue presets.
-  - Real-time trigger button for Denoise synthesis.
-- [ ] Main Viewport:
-  - 3-Way Comparative Synchronized Viewport:
-    1. Low-Dose Input (Noisy).
-    2. RadSwin-WGAN Reconstructed Output (Denoised).
-    3. Artifact / Residual Difference Map (Jet Heatmap).
-  - Interactive Split-Slider View (Before/After comparison with draggable divider).
-  - Full-screen zoom and inspection tools.
-- [ ] Synthetic CT Slice Generator & Preset assets.
-
-### Phase 3: Verification & Execution
-- Verify Next.js build and type-checking.
-- Provide step-by-step local execution instructions.
+## 4. Implementation Steps
+1. **Backend**:
+   - Re-implement `backend/core/models.py` with `UNetColorGenerator` and `PatchGANColorDiscriminator`.
+   - Update `backend/core/losses.py` with cGAN losses.
+   - Update `backend/core/inference.py` with CIELAB conversion and fast inference.
+   - Update `backend/main.py` with `POST /api/colorize` and health check.
+2. **Frontend**:
+   - Update `frontend/types/index.ts`.
+   - Build `frontend/components/SamplePresets.ts` with vintage B&W generators.
+   - Update `frontend/components/Header.tsx`, `Sidebar.tsx`, `SplitSlider.tsx`, and `SideBySideGrid.tsx`.
+   - Update `frontend/app/page.tsx` for the ChromaGAN Studio.
+3. **Verification**:
+   - Compile Python backend.
+   - Build Next.js frontend (`npm run build`).
+   - Test `npm run dev` on port 3003.
+   - Commit & push to GitHub.

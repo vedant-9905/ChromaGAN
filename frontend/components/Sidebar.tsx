@@ -3,78 +3,67 @@
 import React, { useRef } from "react";
 import {
   Upload,
-  Sliders,
   Sparkles,
+  Sliders,
+  Image as ImageIcon,
+  Sun,
   Layers,
-  FileImage,
+  Wand2,
   RefreshCw,
-  SunMedium,
-  Contrast,
-  Zap,
 } from "lucide-react";
-import { PresetArtifactType, WindowPresetKey, WindowPreset } from "@/types";
+import { ColorStyle, ColorStyleOption, SamplePresetKey } from "@/types";
 
 interface SidebarProps {
   onFileUpload: (file: File) => void;
-  onPresetSelect: (preset: PresetArtifactType) => void;
-  selectedPreset: PresetArtifactType | null;
-  currentWindowPreset: WindowPresetKey;
-  onWindowPresetChange: (key: WindowPresetKey) => void;
-  windowLevel: number;
-  windowWidth: number;
-  onWindowLevelChange: (val: number) => void;
-  onWindowWidthChange: (val: number) => void;
-  onRunDenoise: () => void;
+  onPresetSelect: (preset: SamplePresetKey) => void;
+  selectedPreset: SamplePresetKey | null;
+  selectedStyle: ColorStyle;
+  onStyleSelect: (style: ColorStyle) => void;
+  saturation: number;
+  onSaturationChange: (val: number) => void;
+  onRunColorize: () => void;
   isProcessing: boolean;
-  hasScanLoaded: boolean;
+  hasPhotoLoaded: boolean;
 }
 
-export const WINDOW_PRESET_MAP: Record<WindowPresetKey, WindowPreset> = {
-  lung: {
-    name: "Lung (Parenchyma)",
-    windowLevel: -600,
-    windowWidth: 1500,
-    backendKey: "lung",
+const COLOR_STYLES: ColorStyleOption[] = [
+  {
+    id: "vibrant",
+    label: "Vibrant Modern",
+    description: "Rich chromatic saturation with high dynamic range",
+    tagColor: "border-purple-500/40 text-purple-300",
   },
-  soft_tissue: {
-    name: "Mediastinum / Soft Tissue",
-    windowLevel: 40,
-    windowWidth: 400,
-    backendKey: "soft_tissue",
+  {
+    id: "natural",
+    label: "Natural Historic",
+    description: "Balanced, historically authentic archival tones",
+    tagColor: "border-emerald-500/40 text-emerald-300",
   },
-  bone: {
-    name: "Osseous / Bone",
-    windowLevel: 400,
-    windowWidth: 1800,
-    backendKey: "default",
+  {
+    id: "warm_vintage",
+    label: "Warm Golden Hour",
+    description: "Sepia-infused golden highlights and warm amber glow",
+    tagColor: "border-amber-500/40 text-amber-300",
   },
-  brain: {
-    name: "Cerebral / Brain",
-    windowLevel: 40,
-    windowWidth: 80,
-    backendKey: "default",
+  {
+    id: "cool_cinematic",
+    label: "Cool Cinematic",
+    description: "Teal and slate tones with dramatic cool shadows",
+    tagColor: "border-cyan-500/40 text-cyan-300",
   },
-  custom: {
-    name: "Custom HU Window",
-    windowLevel: 0,
-    windowWidth: 1000,
-    backendKey: "default",
-  },
-};
+];
 
 export const Sidebar: React.FC<SidebarProps> = ({
   onFileUpload,
   onPresetSelect,
   selectedPreset,
-  currentWindowPreset,
-  onWindowPresetChange,
-  windowLevel,
-  windowWidth,
-  onWindowLevelChange,
-  onWindowWidthChange,
-  onRunDenoise,
+  selectedStyle,
+  onStyleSelect,
+  saturation,
+  onSaturationChange,
+  onRunColorize,
   isProcessing,
-  hasScanLoaded,
+  hasPhotoLoaded,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -96,187 +85,174 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   return (
-    <aside className="w-80 border-r border-pacs-800 bg-pacs-900/95 flex flex-col justify-between p-4 overflow-y-auto">
+    <aside className="w-80 border-r border-slate-800 bg-slate-900/95 flex flex-col justify-between p-4 overflow-y-auto">
       <div className="space-y-6">
-        {/* Upload Panel */}
+        {/* Upload Zone */}
         <section>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-              <Upload className="w-3.5 h-3.5 text-cyan-400" /> Ingest CT Slice
+              <Upload className="w-3.5 h-3.5 text-violet-400" /> Upload B&W Photo
             </span>
-            <span className="text-[10px] text-slate-400 font-mono">DICOM / PNG</span>
+            <span className="text-[10px] text-slate-400 font-mono">JPG / PNG / WebP</span>
           </div>
 
           <div
             onDragOver={handleDragOver}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-pacs-700 hover:border-cyan-500/80 rounded-xl p-4 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 bg-pacs-850/50 hover:bg-pacs-850 group"
+            className="border-2 border-dashed border-slate-700 hover:border-violet-500/80 rounded-2xl p-4 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 bg-slate-850/50 hover:bg-slate-800/80 group"
           >
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/png,image/jpeg,image/bmp,image/tiff"
+              accept="image/png,image/jpeg,image/webp,image/bmp"
               onChange={handleFileChange}
               className="hidden"
             />
-            <div className="w-10 h-10 rounded-full bg-pacs-800 group-hover:bg-cyan-500/10 flex items-center justify-center mb-2 transition-colors">
-              <FileImage className="w-5 h-5 text-slate-400 group-hover:text-cyan-400 transition-colors" />
+            <div className="w-10 h-10 rounded-full bg-slate-800 group-hover:bg-violet-500/10 flex items-center justify-center mb-2 transition-colors">
+              <ImageIcon className="w-5 h-5 text-slate-400 group-hover:text-violet-400 transition-colors" />
             </div>
             <p className="text-xs font-medium text-slate-200">
-              Drop slice or <span className="text-cyan-400 underline">browse</span>
+              Drag photo here or <span className="text-violet-400 underline">browse</span>
             </p>
-            <p className="text-[10px] text-slate-400 mt-1">Single-channel 16-bit or 8-bit axial scan</p>
+            <p className="text-[10px] text-slate-400 mt-1">Vintage archival or grayscale image</p>
           </div>
         </section>
 
-        {/* Diagnostic Preset Selections */}
+        {/* 1-Click Historical Presets */}
         <section>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-cyan-400" /> Anatomical Presets
+              <Layers className="w-3.5 h-3.5 text-violet-400" /> Historical Presets
             </span>
-            <span className="text-[10px] text-cyan-400/90 font-mono">1-Click Test</span>
+            <span className="text-[10px] text-violet-400 font-mono">1-Click Test</span>
           </div>
 
-          <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={() => onPresetSelect("normal")}
-              className={`w-full text-left p-2.5 rounded-lg border text-xs transition-all flex items-center justify-between ${
-                selectedPreset === "normal"
-                  ? "bg-cyan-950/40 border-cyan-500 text-cyan-200 shadow-glow-sm"
-                  : "bg-pacs-850 border-pacs-700/80 text-slate-300 hover:border-pacs-600"
+              onClick={() => onPresetSelect("classic_portrait")}
+              className={`p-2.5 rounded-xl border text-left transition-all ${
+                selectedPreset === "classic_portrait"
+                  ? "bg-violet-950/40 border-violet-500 text-violet-200 shadow-md shadow-violet-500/10"
+                  : "bg-slate-800/60 border-slate-700/80 text-slate-300 hover:border-slate-600"
               }`}
             >
-              <div>
-                <div className="font-semibold text-slate-200">Normal Dose CT (Ref)</div>
-                <div className="text-[10px] text-slate-400">High mAs baseline thoracic acquisition</div>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <div className="text-xs font-semibold">1920s Portrait</div>
+              <div className="text-[10px] text-slate-400 truncate">Studio lighting</div>
             </button>
 
             <button
-              onClick={() => onPresetSelect("high_noise")}
-              className={`w-full text-left p-2.5 rounded-lg border text-xs transition-all flex items-center justify-between ${
-                selectedPreset === "high_noise"
-                  ? "bg-cyan-950/40 border-cyan-500 text-cyan-200 shadow-glow-sm"
-                  : "bg-pacs-850 border-pacs-700/80 text-slate-300 hover:border-pacs-600"
+              onClick={() => onPresetSelect("vintage_car")}
+              className={`p-2.5 rounded-xl border text-left transition-all ${
+                selectedPreset === "vintage_car"
+                  ? "bg-violet-950/40 border-violet-500 text-violet-200 shadow-md shadow-violet-500/10"
+                  : "bg-slate-800/60 border-slate-700/80 text-slate-300 hover:border-slate-600"
               }`}
             >
-              <div>
-                <div className="font-semibold text-slate-200">Ultra-Low Dose (Poisson Noise)</div>
-                <div className="text-[10px] text-slate-400">Quantum mottle & electronic sensor noise</div>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
+              <div className="text-xs font-semibold">Classic Car</div>
+              <div className="text-[10px] text-slate-400 truncate">1930s Roadster</div>
             </button>
 
             <button
-              onClick={() => onPresetSelect("streak_artifact")}
-              className={`w-full text-left p-2.5 rounded-lg border text-xs transition-all flex items-center justify-between ${
-                selectedPreset === "streak_artifact"
-                  ? "bg-cyan-950/40 border-cyan-500 text-cyan-200 shadow-glow-sm"
-                  : "bg-pacs-850 border-pacs-700/80 text-slate-300 hover:border-pacs-600"
+              onClick={() => onPresetSelect("old_city")}
+              className={`p-2.5 rounded-xl border text-left transition-all ${
+                selectedPreset === "old_city"
+                  ? "bg-violet-950/40 border-violet-500 text-violet-200 shadow-md shadow-violet-500/10"
+                  : "bg-slate-800/60 border-slate-700/80 text-slate-300 hover:border-slate-600"
               }`}
             >
-              <div>
-                <div className="font-semibold text-slate-200">Photon Starvation Artifacts</div>
-                <div className="text-[10px] text-slate-400">Severe streak lines & beam-hardening</div>
-              </div>
-              <span className="w-2 h-2 rounded-full bg-rose-400" />
+              <div className="text-xs font-semibold">Historic City</div>
+              <div className="text-[10px] text-slate-400 truncate">Cobblestone street</div>
+            </button>
+
+            <button
+              onClick={() => onPresetSelect("landscape")}
+              className={`p-2.5 rounded-xl border text-left transition-all ${
+                selectedPreset === "landscape"
+                  ? "bg-violet-950/40 border-violet-500 text-violet-200 shadow-md shadow-violet-500/10"
+                  : "bg-slate-800/60 border-slate-700/80 text-slate-300 hover:border-slate-600"
+              }`}
+            >
+              <div className="text-xs font-semibold">Yosemite Lake</div>
+              <div className="text-[10px] text-slate-400 truncate">Alpine peaks</div>
             </button>
           </div>
         </section>
 
-        {/* Hounsfield Window & Leveling */}
+        {/* Color Grading Styles */}
         <section>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-              <Sliders className="w-3.5 h-3.5 text-cyan-400" /> HU Windowing (W/L)
+              <Sparkles className="w-3.5 h-3.5 text-violet-400" /> Color Palette Grade
             </span>
           </div>
 
-          {/* Quick Preset Buttons */}
-          <div className="grid grid-cols-2 gap-1.5 mb-3">
-            {(["lung", "soft_tissue", "bone", "brain"] as WindowPresetKey[]).map((key) => {
-              const preset = WINDOW_PRESET_MAP[key];
-              const isSelected = currentWindowPreset === key;
-              return (
-                <button
-                  key={key}
-                  onClick={() => onWindowPresetChange(key)}
-                  className={`px-2 py-1.5 rounded text-[11px] font-medium border text-center transition-colors truncate ${
-                    isSelected
-                      ? "bg-cyan-500/20 border-cyan-400 text-cyan-300"
-                      : "bg-pacs-850 border-pacs-700/60 text-slate-300 hover:border-pacs-600"
-                  }`}
-                >
-                  {preset.name.split(" ")[0]}
-                </button>
-              );
-            })}
+          <div className="space-y-1.5">
+            {COLOR_STYLES.map((style) => (
+              <button
+                key={style.id}
+                onClick={() => onStyleSelect(style.id)}
+                className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex flex-col ${
+                  selectedStyle === style.id
+                    ? "bg-violet-950/40 border-violet-500 text-violet-200 shadow-sm"
+                    : "bg-slate-800/50 border-slate-700/70 text-slate-300 hover:border-slate-600"
+                }`}
+              >
+                <span className="font-semibold">{style.label}</span>
+                <span className="text-[10px] text-slate-400 mt-0.5">{style.description}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {/* Saturation Slider */}
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <Sun className="w-3.5 h-3.5 text-violet-400" /> Chromatic Saturation
+            </span>
+            <span className="text-xs font-mono text-violet-300 font-bold">{saturation.toFixed(1)}x</span>
           </div>
 
-          {/* Sliders */}
-          <div className="space-y-3 bg-pacs-850/60 p-3 rounded-lg border border-pacs-800">
-            <div>
-              <div className="flex justify-between text-[11px] mb-1 font-mono">
-                <span className="text-slate-400 flex items-center gap-1">
-                  <SunMedium className="w-3 h-3 text-cyan-400" /> Level (WL):
-                </span>
-                <span className="text-cyan-300 font-semibold">{windowLevel} HU</span>
-              </div>
-              <input
-                type="range"
-                min="-1000"
-                max="1000"
-                step="10"
-                value={windowLevel}
-                onChange={(e) => onWindowLevelChange(Number(e.target.value))}
-                className="w-full"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-[11px] mb-1 font-mono">
-                <span className="text-slate-400 flex items-center gap-1">
-                  <Contrast className="w-3 h-3 text-cyan-400" /> Width (WW):
-                </span>
-                <span className="text-cyan-300 font-semibold">{windowWidth} HU</span>
-              </div>
-              <input
-                type="range"
-                min="50"
-                max="3000"
-                step="25"
-                value={windowWidth}
-                onChange={(e) => onWindowWidthChange(Number(e.target.value))}
-                className="w-full"
-              />
+          <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-700/80">
+            <input
+              type="range"
+              min="0.5"
+              max="2.2"
+              step="0.1"
+              value={saturation}
+              onChange={(e) => onSaturationChange(Number(e.target.value))}
+              className="w-full"
+            />
+            <div className="flex justify-between text-[9px] font-mono text-slate-400 mt-1.5">
+              <span>Muted (0.5x)</span>
+              <span>Default (1.2x)</span>
+              <span>Intense (2.2x)</span>
             </div>
           </div>
         </section>
       </div>
 
-      {/* Primary Action Button */}
-      <div className="pt-4 border-t border-pacs-800">
+      {/* Main Colorize Action Button */}
+      <div className="pt-4 border-t border-slate-800">
         <button
-          onClick={onRunDenoise}
-          disabled={!hasScanLoaded || isProcessing}
-          className={`w-full py-3 px-4 rounded-xl font-semibold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center space-x-2 shadow-lg ${
-            !hasScanLoaded || isProcessing
-              ? "bg-pacs-800 text-slate-500 cursor-not-allowed border border-pacs-700/50"
-              : "bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-400 hover:to-teal-400 text-pacs-950 font-bold shadow-glow hover:shadow-cyan-500/40"
+          onClick={onRunColorize}
+          disabled={!hasPhotoLoaded || isProcessing}
+          className={`w-full py-3.5 px-4 rounded-xl font-bold text-xs tracking-wider uppercase transition-all duration-200 flex items-center justify-center space-x-2 shadow-lg ${
+            !hasPhotoLoaded || isProcessing
+              ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50"
+              : "bg-gradient-to-r from-violet-600 via-purple-600 to-cyan-500 hover:from-violet-500 hover:to-cyan-400 text-white shadow-purple-500/30 hover:shadow-purple-500/50"
           }`}
         >
           {isProcessing ? (
             <>
-              <RefreshCw className="w-4 h-4 animate-spin text-slate-300" />
-              <span className="text-slate-200">Restoring Anatomy...</span>
+              <RefreshCw className="w-4 h-4 animate-spin text-white" />
+              <span>Synthesizing Colors...</span>
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4" />
-              <span>Synthesize WGAN-GP</span>
+              <Wand2 className="w-4 h-4" />
+              <span>Colorize with cGAN</span>
             </>
           )}
         </button>

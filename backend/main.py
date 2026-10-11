@@ -1,11 +1,13 @@
 """
 main.py
 =======
-RadSwin-WGAN FastAPI Application
+ChromaGAN FastAPI Application
+Production-grade REST API for cGAN B&W Photo Colorization.
 
 Endpoints:
-  POST /api/denoise  — Upload image, run WGAN-GP inference, return base64 results + metrics
-  GET  /api/health   — Health check with device/model status
+  POST /api/colorize — Ingests B&W photo, predicts CIELAB chrominance (a, b),
+                       returns colorized result, chromatic heatmap, and metrics.
+  GET  /api/health   — System and PyTorch device health check.
 
 Run with:
   uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -14,10 +16,9 @@ Run with:
 from __future__ import annotations
 
 import base64
-import io
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -27,8 +28,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from core.inference import build_generator, run_inference, WINDOW_PRESETS
-from core.models import ResUNetGenerator
+from core.inference import build_generator, run_colorization
+from core.models import UNetColorGenerator
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ from core.models import ResUNetGenerator
 # ---------------------------------------------------------------------------
 
 class AppState:
-    generator: Optional[ResUNetGenerator] = None
+    generator: Optional[UNetColorGenerator] = None
     device: Optional[torch.device] = None
     startup_time: float = 0.0
     model_loaded: bool = False
@@ -46,49 +47,45 @@ app_state = AppState()
 
 
 # ---------------------------------------------------------------------------
-# Lifespan — load model once at startup
+# Lifespan Management
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the generator on startup; teardown on shutdown."""
+    """Initializes PyTorch generator on startup and handles clean teardown."""
     app_state.startup_time = time.time()
     app_state.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"[RadSwin-WGAN] Initializing generator on {app_state.device}...")
+    print(f"[ChromaGAN] Initializing U-Net Color Generator on {app_state.device}...")
     try:
         app_state.generator = build_generator(app_state.device)
         app_state.model_loaded = True
-        print("[RadSwin-WGAN] Generator ready.")
+        print("[ChromaGAN] U-Net Color Generator loaded successfully.")
     except Exception as exc:
-        print(f"[RadSwin-WGAN] WARNING: Failed to load generator: {exc}")
+        print(f"[ChromaGAN] WARNING: Model loading encountered an error: {exc}")
         app_state.model_loaded = False
 
     yield
 
-    # Cleanup
     if app_state.generator is not None:
         del app_state.generator
         if app_state.device and app_state.device.type == "cuda":
             torch.cuda.empty_cache()
-    print("[RadSwin-WGAN] Shutdown complete.")
+    print("[ChromaGAN] Service shutdown complete.")
 
 
 # ---------------------------------------------------------------------------
-# FastAPI App
+# FastAPI App Instance
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="RadSwin-WGAN API",
-    description=(
-        "End-to-end LDCT image denoising API using a multi-scale Residual U-Net "
-        "Generator trained with WGAN-GP + perceptual losses."
-    ),
-    version="1.0.0",
+    title="ChromaGAN Studio API",
+    description="Conditional Generative Adversarial Network (cGAN) for photo colorization in CIELAB color space.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# CORS — allow Next.js dev server
+# CORS configuration allowing local development workstations
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -104,7 +101,7 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Response Schemas
+# Pydantic Schemas
 # ---------------------------------------------------------------------------
 
 class HealthResponse(BaseModel):
@@ -116,26 +113,25 @@ class HealthResponse(BaseModel):
     torch_version: str
 
 
-class DenoiseResponse(BaseModel):
-    original_b64: str       # base64 PNG of windowed input
-    denoised_b64: str       # base64 PNG of denoised output
-    heatmap_b64: str        # base64 PNG of residual heatmap
-    psnr: float             # Peak Signal-to-Noise Ratio (dB)
-    ssim: float             # Structural Similarity Index [0,1]
-    reconstruction_fidelity: float  # ssim * 100 (%)
+class ColorizeResponse(BaseModel):
+    original_b64: str          # Grayscale B&W original
+    colorized_b64: str         # Synthesized full-color image
+    heatmap_b64: str           # Chromatic distribution heatmap
+    colorfulness_score: float  # Hasler-Süsstrunk metric
+    resolution: str
     inference_time_ms: float
 
 
 # ---------------------------------------------------------------------------
-# Utility
+# Utilities
 # ---------------------------------------------------------------------------
 
-def ndarray_to_base64_png(arr: np.ndarray) -> str:
-    """Encode a NumPy array (uint8) to a base64-encoded PNG string."""
-    success, buf = cv2.imencode(".png", arr)
+def ndarray_to_base64_png(img_bgr: np.ndarray) -> str:
+    """Encodes BGR numpy array to base64 PNG string."""
+    success, buffer = cv2.imencode(".png", img_bgr)
     if not success:
-        raise RuntimeError("Failed to encode image to PNG")
-    return base64.b64encode(buf.tobytes()).decode("utf-8")
+        raise RuntimeError("Failed to encode image to PNG format.")
+    return base64.b64encode(buffer.tobytes()).decode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +140,7 @@ def ndarray_to_base64_png(arr: np.ndarray) -> str:
 
 @app.get("/api/health", response_model=HealthResponse, tags=["System"])
 async def health_check() -> HealthResponse:
-    """Returns service health, device info, and model status."""
+    """Returns runtime health, device backend, and PyTorch status."""
     uptime = time.time() - app_state.startup_time
     device_str = str(app_state.device) if app_state.device else "unknown"
 
@@ -153,7 +149,7 @@ async def health_check() -> HealthResponse:
         try:
             gpu_name = torch.cuda.get_device_name(app_state.device)
         except Exception:
-            gpu_name = "Unknown GPU"
+            gpu_name = "Unknown CUDA Device"
 
     return HealthResponse(
         status="ok" if app_state.model_loaded else "degraded",
@@ -165,46 +161,37 @@ async def health_check() -> HealthResponse:
     )
 
 
-@app.post("/api/denoise", response_model=DenoiseResponse, tags=["Inference"])
-async def denoise_image(
-    file: UploadFile = File(..., description="CT scan image (PNG/JPEG/BMP)"),
-    window_preset: str = Form(default="lung", description="HU window preset: lung | soft_tissue | default"),
-) -> DenoiseResponse:
+@app.post("/api/colorize", response_model=ColorizeResponse, tags=["Inference"])
+async def colorize_photo(
+    file: UploadFile = File(..., description="B&W or Grayscale photograph (PNG/JPEG/BMP)"),
+    saturation: float = Form(default=1.2, description="Color saturation multiplier [0.5, 2.5]"),
+    color_style: str = Form(
+        default="vibrant",
+        description="Artistic color grade: natural | vibrant | warm_vintage | cool_cinematic",
+    ),
+) -> ColorizeResponse:
     """
-    Accepts a CT slice image and returns:
-    - Original (windowed) image as base64 PNG
-    - WGAN-GP denoised image as base64 PNG
-    - Residual heatmap (Jet colormap) as base64 PNG
-    - Quantitative metrics: PSNR, SSIM, Reconstruction Fidelity
+    Colorizes a black-and-white or historical photograph:
+    - Extracts Luminance channel L
+    - U-Net Generator synthesizes (a, b) chrominance channels
+    - Recombines to RGB and returns high-resolution colorized image + metrics
     """
     if not app_state.model_loaded or app_state.generator is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Generator model not loaded. Service unavailable.",
-        )
+        raise HTTPException(status_code=503, detail="ChromaGAN Generator not loaded.")
 
-    # Validate window preset
-    valid_presets = list(WINDOW_PRESETS.keys())
-    if window_preset not in valid_presets:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid window_preset '{window_preset}'. Must be one of: {valid_presets}",
-        )
-
-    # Read uploaded bytes
     try:
         image_bytes = await file.read()
         if not image_bytes:
-            raise HTTPException(status_code=400, detail="Empty file uploaded.")
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to read uploaded file: {exc}")
+        raise HTTPException(status_code=400, detail=f"Failed to read file: {exc}")
 
-    # Run inference
     t_start = time.perf_counter()
     try:
-        results = run_inference(
+        results = run_colorization(
             image_bytes=image_bytes,
-            window_preset=window_preset,
+            saturation=max(0.5, min(2.5, saturation)),
+            color_style=color_style,
             device=app_state.device,
             generator=app_state.generator,
         )
@@ -214,36 +201,21 @@ async def denoise_image(
         raise HTTPException(status_code=500, detail=f"Inference error: {exc}")
     t_end = time.perf_counter()
 
-    inference_ms = (t_end - t_start) * 1000.0
+    latency_ms = (t_end - t_start) * 1000.0
 
-    # Encode outputs to base64 PNG
-    try:
-        original_b64 = ndarray_to_base64_png(results["original_u8"])
-        denoised_b64 = ndarray_to_base64_png(results["denoised_u8"])
-        heatmap_b64  = ndarray_to_base64_png(results["heatmap_bgr"])
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Image encoding error: {exc}")
+    original_b64 = ndarray_to_base64_png(results["bw_original_bgr"])
+    colorized_b64 = ndarray_to_base64_png(results["colorized_bgr"])
+    heatmap_b64 = ndarray_to_base64_png(results["chroma_heatmap"])
 
-    return DenoiseResponse(
+    return ColorizeResponse(
         original_b64=original_b64,
-        denoised_b64=denoised_b64,
+        colorized_b64=colorized_b64,
         heatmap_b64=heatmap_b64,
-        psnr=round(results["psnr"], 4),
-        ssim=round(results["ssim"], 4),
-        reconstruction_fidelity=round(results["reconstruction_fidelity"], 2),
-        inference_time_ms=round(inference_ms, 2),
+        colorfulness_score=results["colorfulness_score"],
+        resolution=results["resolution"],
+        inference_time_ms=round(latency_ms, 2),
     )
 
-
-# ---------------------------------------------------------------------------
-# Dev Entry Point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info",
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

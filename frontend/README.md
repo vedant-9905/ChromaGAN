@@ -1,15 +1,17 @@
-# RadSwin-WGAN Radiologist Workstation (Frontend)
+# ChromaGAN Studio (Frontend)
 
-Next.js 14 medical imaging workstation for deep learning LDCT restoration.
+Production-grade Next.js 14 AI Photo Colorization & Vintage Restoration Studio.
 
 ## Features
-- **3-Way Comparative Viewport**: Low-Dose CT (Noisy), WGAN-GP Reconstructed (Denoised), and Jet-Colormap Residual Error Heatmap.
-- **Micro-Structure Split-Screen Inspector**: Draggable comparative divider for examining anatomical fine edge retention vs. noise rejection.
-- **Hounsfield Unit (HU) Windowing**: Real-time Window Level (WL) and Window Width (WW) sliders with presets for Lung, Soft Tissue, Bone, and Brain.
-- **Anatomical Presets**: One-click procedural synthetic CT generation (Normal dose, Poisson quantum noise, Photon starvation streak artifacts).
-- **Quantitative Metrics HUD**: Real-time display of Peak SNR (PSNR), Structural Similarity (SSIM), Reconstruction Fidelity %, and GPU/CPU inference latency.
+- **cGAN Neural Colorization**: Real-time CIELAB luminance-to-chrominance translation.
+- **Interactive Split-Screen Slider**: Sub-pixel draggable divider for before/after comparison.
+- **Historical Presets**: 1-click test cases (1920s Portrait, 1930s Roadster Car, Historic City, Yosemite Lake).
+- **Artistic Color Palettes**: Vibrant Modern, Natural Historic, Warm Golden Hour, Cool Cinematic.
+- **Chromatic Saturation Control**: Real-time slider from muted tones to intense saturation.
+- **Quantitative Metrics HUD**: Real-time Hasler-Süsstrunk Colorfulness Score and inference latency in milliseconds.
+- **1-Click High-Res PNG Export**.
 
-## Getting Started
+## Quickstart
 
 ```bash
 cd frontend
@@ -17,4 +19,4 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3003](http://localhost:3003) with your browser.
+Open [http://localhost:3003](http://localhost:3003) in your browser.
