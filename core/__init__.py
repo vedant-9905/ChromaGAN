@@ -6,6 +6,7 @@ from core.losses import ChromaGANLoss
 from core.inference import run_colorization, build_generator, compute_colorfulness
 
 from core.pipeline import studio_engine, ChromaGANEngine, PRESETS, export_image
+from core.dataset import ColorizationDataset, get_colorization_dataloader
 
 __all__ = [
     "UNetColorGenerator",
@@ -18,4 +19,6 @@ __all__ = [
     "ChromaGANEngine",
     "PRESETS",
     "export_image",
+    "ColorizationDataset",
+    "get_colorization_dataloader",
 ]

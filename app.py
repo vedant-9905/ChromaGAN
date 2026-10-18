@@ -26,10 +26,11 @@ OUTPUT_FILE = "colorized_photo.png"
 # Pre-warm SOTA Neural Models & Sample Gallery at Startup
 # ---------------------------------------------------------------------------
 
-print("[ChromaGAN] Pre-warming precision neural models...")
+import threading
+
+print("[ChromaGAN] Initializing precision neural models...")
 get_models()
 
-# Pre-warm the 6 historical samples into in-memory cache for instant (< 1ms) testing
 SAMPLE_PATHS = [
     "assets/samples/classic_portrait.png",
     "assets/samples/vintage_car.png",
@@ -39,14 +40,19 @@ SAMPLE_PATHS = [
     "assets/samples/ansel_adams3.jpg",
 ]
 
-print("[ChromaGAN] Pre-warming sample gallery into memory cache...")
-for sp in SAMPLE_PATHS:
-    if os.path.exists(sp):
-        s_img = cv2.imread(sp)
-        if s_img is not None:
-            s_rgb = cv2.cvtColor(s_img, cv2.COLOR_BGR2RGB)
-            studio_engine.colorize(s_rgb)
-print("[ChromaGAN] Neural models & sample cache ready.")
+def _prewarm_samples_async() -> None:
+    """Pre-warms gallery in background thread to ensure instant sub-second app startup."""
+    for sp in SAMPLE_PATHS:
+        if os.path.exists(sp):
+            s_img = cv2.imread(sp)
+            if s_img is not None:
+                s_rgb = cv2.cvtColor(s_img, cv2.COLOR_BGR2RGB)
+                studio_engine.colorize(s_rgb)
+    print("[ChromaGAN] Background sample gallery pre-warming completed.")
+
+# Launch non-blocking background thread for cache pre-warming
+threading.Thread(target=_prewarm_samples_async, daemon=True).start()
+print("[ChromaGAN] Neural models initialized. Studio ready for instant launch.")
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,8 @@ ENV/
 *.pth
 *.pt
 *.onnx
+models/
+!models/.gitkeep
 
 # Node & Next.js
 node_modules/
