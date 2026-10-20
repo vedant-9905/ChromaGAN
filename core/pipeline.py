@@ -78,6 +78,15 @@ class ReviveGANEngine:
             img_rgb = input_image[:, :, :3]
 
         orig_h, orig_w = img_rgb.shape[:2]
+        # Auto-upscale low-resolution archival photographs for crisp, high-definition restoration
+        if min(orig_h, orig_w) < 360:
+            target_min = 600
+            scale_factor = target_min / min(orig_h, orig_w)
+            new_w = int(orig_w * scale_factor)
+            new_h = int(orig_h * scale_factor)
+            img_rgb = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            orig_h, orig_w = new_h, new_w
+
         scale = max(0.4, min(2.0, min(orig_h, orig_w) / 400.0))
 
         # Check Cache
@@ -93,7 +102,7 @@ class ReviveGANEngine:
         damaged_pixel_count = int(np.sum(defect_mask > 0))
 
         if damaged_pixel_count > 0:
-            r_inpaint = max(3, int(4.0 * scale))
+            r_inpaint = max(2, int(3.0 * scale))
             healed_rgb = inpaint_scratches(img_rgb, defect_mask, inpaint_radius=r_inpaint, method="telea")
         else:
             healed_rgb = img_rgb.copy()
@@ -109,13 +118,13 @@ class ReviveGANEngine:
         # High-frequency detail sharpening
         restored_sharp_rgb, _ = restore_high_frequency_details(defaded_rgb, strength=detail_enhancement)
 
-        # Restored Luminance Channel
+        # Restored Luminance Channel (preserves original crisp facial features)
         gray_healed = cv2.cvtColor(restored_sharp_rgb, cv2.COLOR_RGB2GRAY)
 
         # Subtle contrast enhancement
-        clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=1.4, tileGridSize=(8, 8))
         l_clahe = clahe.apply(gray_healed)
-        l_final_u8 = cv2.addWeighted(gray_healed, 0.75, l_clahe, 0.25, 0)
+        l_final_u8 = cv2.addWeighted(gray_healed, 0.80, l_clahe, 0.20, 0)
         bw_restored_rgb = np.stack([l_final_u8, l_final_u8, l_final_u8], axis=-1)
 
         # -------------------------------------------------------------------
@@ -143,22 +152,22 @@ class ReviveGANEngine:
         # -------------------------------------------------------------------
         # Step 4: Natural Skin Gamut Calibration & Eye Sclera Protection
         # -------------------------------------------------------------------
-        # Strictly clamp 'a' (red) to natural human threshold [-14.0, 13.0]
-        # and 'b' (yellow) to [-18.0, 20.0] to prevent red clown blotches
-        a_ch = np.clip(out_ab_np[:, :, 0], -14.0, 13.0)
-        b_ch = np.clip(out_ab_np[:, :, 1], -18.0, 20.0)
+        # Natural skin tone calibration in CIELAB
+        a_ch = np.clip(out_ab_np[:, :, 0], -13.0, 15.0)
+        b_ch = np.clip(out_ab_np[:, :, 1], -17.0, 20.0)
 
-        # Desaturate high-contrast facial contours (eyes, pupils, nostrils)
+        # Desaturate high-contrast facial contours (eyes, pupils, nostrils) to keep eyes crisp white
         sobel = cv2.magnitude(cv2.Sobel(l_final_u8, cv2.CV_32F, 1, 0), cv2.Sobel(l_final_u8, cv2.CV_32F, 0, 1))
         eye_desat_mask = (sobel > 40) & (l_in > 25) & (l_in < 80)
         a_ch = np.where(eye_desat_mask, a_ch * 0.40, a_ch)
 
-        # Snap colors to high-resolution luminance edges with bilateral filter
-        a_cv = np.clip(a_ch + 128.0, 0, 255).astype(np.uint8)
-        b_cv = np.clip(b_ch + 128.0, 0, 255).astype(np.uint8)
+        # Smooth photographic color gradients (eliminates block/facet artifacts)
+        k_smooth = max(5, int(9 * scale)) | 1
+        a_smooth = cv2.GaussianBlur(a_ch, (k_smooth, k_smooth), 2.5 * scale)
+        b_smooth = cv2.GaussianBlur(b_ch, (k_smooth, k_smooth), 2.5 * scale)
 
-        a_cv = cv2.bilateralFilter(a_cv, d=7, sigmaColor=35, sigmaSpace=35)
-        b_cv = cv2.bilateralFilter(b_cv, d=7, sigmaColor=35, sigmaSpace=35)
+        a_cv = np.clip(a_smooth + 128.0, 0, 255).astype(np.uint8)
+        b_cv = np.clip(b_smooth + 128.0, 0, 255).astype(np.uint8)
 
         lab_final = cv2.merge([l_final_u8, a_cv, b_cv])
         final_rgb = cv2.cvtColor(lab_final, cv2.COLOR_LAB2RGB)

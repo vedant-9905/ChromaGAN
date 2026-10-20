@@ -23,8 +23,8 @@ def detect_scratches_and_defects(
 ) -> np.ndarray:
     """
     High-precision crack, tear, fold crease, and scratch localization.
-    Captures deep paper tears, thin hairline craquelure, and dark emulsion gouges
-    while protecting continuous anatomical features.
+    Captures deep paper tears, thin hairline craquelure, and emulsion gouges
+    without affecting facial features (eyes, nose, mouth, contours).
     """
     if strength <= 1.0:
         h, w = img_bgr_or_gray.shape[:2]
@@ -38,51 +38,57 @@ def detect_scratches_and_defects(
     h, w = gray.shape[:2]
     scale = max(0.4, min(2.0, min(h, w) / 400.0))
 
-    # 1. Laplacian / Hessian Ridge Detection
-    # Sharp cracks have large second derivative relative to smooth skin/fabric
-    lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
-    ridge_thresh = max(14.0, 28.0 - (strength / 100.0) * 16.0)
-    _, ridge_mask = cv2.threshold(np.abs(lap), int(ridge_thresh), 255, cv2.THRESH_BINARY)
-    ridge_mask = ridge_mask.astype(np.uint8)
+    # Multi-directional linear kernels (horizontal, vertical, diagonal)
+    k_len = max(5, int(9 * scale)) | 1
+    k_h = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
+    k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_len))
+    k_d1 = np.eye(k_len, dtype=np.uint8)
+    k_d2 = np.fliplr(np.eye(k_len, dtype=np.uint8))
 
-    # 2. Multi-scale Directional Morphology (Linear Top-Hat & Black-Hat)
-    k1 = max(3, int(5 * scale)) | 1
-    k2 = max(5, int(11 * scale)) | 1
-    k_diag1 = np.eye(k1, dtype=np.uint8)
-    k_diag2 = np.fliplr(np.eye(k1, dtype=np.uint8))
-
-    th = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_diag1),
-                 cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_diag2))
-    bh = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_diag1),
-                 cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_diag2))
-
-    kh = cv2.getStructuringElement(cv2.MORPH_RECT, (k2, 1))
-    kv = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k2))
-    th_hv = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kh),
-                    cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kv))
-    bh_hv = cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kh),
-                    cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kv))
-
-    morph_defects = cv2.max(cv2.max(th, bh), cv2.max(th_hv, bh_hv))
-    morph_thresh = max(10.0, 22.0 - (strength / 100.0) * 14.0)
-    _, morph_mask = cv2.threshold(morph_defects, int(morph_thresh), 255, cv2.THRESH_BINARY)
-
-    # Combine ridge and morphology
-    combined = cv2.bitwise_or(ridge_mask, morph_mask)
-
-    # 3. Clean noise and dilate to cover tear border fringes
-    clean_mask = cv2.morphologyEx(
-        combined,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    th = cv2.max(
+        cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_h), cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_v)),
+        cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_d1), cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_d2))
     )
+    bh = cv2.max(
+        cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_h), cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_v)),
+        cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_d1), cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_d2))
+    )
+    comb = cv2.max(th, bh)
 
-    d_rad = max(2, int(3.5 * scale))
+    # Adaptive outlier thresholding (cracks are high-contrast anomalies)
+    # Target top 2.5% highest-contrast structures
+    p97_5 = float(np.percentile(comb, 97.5))
+    base_thresh = max(26.0, 36.0 - (strength / 100.0) * 14.0)
+    thresh_val = max(base_thresh, p97_5)
+
+    _, raw_mask = cv2.threshold(comb, int(thresh_val), 255, cv2.THRESH_BINARY)
+
+    # Filter connected components: keep only thin cracks or tiny dust flecks
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(raw_mask)
+    clean_mask = np.zeros_like(raw_mask)
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        cw = stats[i, cv2.CC_STAT_WIDTH]
+        ch = stats[i, cv2.CC_STAT_HEIGHT]
+        aspect = max(cw, ch) / max(1, min(cw, ch))
+        # Keep if it is a tiny fleck or an elongated thin defect
+        if area < 18 or (aspect > 1.8 and (min(cw, ch) <= 5 or area < 250)):
+            clean_mask[labels == i] = 255
+
+    # Slight dilation to cover tear border anti-aliasing
+    d_rad = max(2, int(2.5 * scale))
     defect_mask = cv2.dilate(
         clean_mask,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d_rad, d_rad)),
         iterations=1
     )
+
+    # Safety guard: real defect mask must not exceed 3.5% of image area
+    defect_pct = (np.sum(defect_mask > 0) / defect_mask.size) * 100.0
+    if defect_pct > 3.5:
+        # Increase threshold to preserve only strongest tear lines
+        _, high_raw = cv2.threshold(comb, int(thresh_val + 14.0), 255, cv2.THRESH_BINARY)
+        defect_mask = cv2.dilate(high_raw, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
 
     return defect_mask
 
