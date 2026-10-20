@@ -27,6 +27,9 @@ from core.restoration import (
     inpaint_scratches,
     restore_high_frequency_details,
     defade_and_neutralize_sepia,
+    fast_guided_filter,
+    synthesize_4k_octave_details,
+    synthesize_organic_film_grain,
 )
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -78,16 +81,18 @@ class ReviveGANEngine:
             img_rgb = input_image[:, :, :3]
 
         orig_h, orig_w = img_rgb.shape[:2]
-        # Auto-upscale low-resolution archival photographs for crisp, high-definition restoration
-        if min(orig_h, orig_w) < 360:
-            target_min = 600
-            scale_factor = target_min / min(orig_h, orig_w)
+        # Target 4K / Ultra-HD master presentation canvas
+        target_long_edge = 1920
+        if max(orig_h, orig_w) < target_long_edge:
+            scale_factor = target_long_edge / max(orig_h, orig_w)
             new_w = int(orig_w * scale_factor)
             new_h = int(orig_h * scale_factor)
             img_rgb = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-            orig_h, orig_w = new_h, new_w
+            h_4k, w_4k = new_h, new_w
+        else:
+            h_4k, w_4k = orig_h, orig_w
 
-        scale = max(0.4, min(2.0, min(orig_h, orig_w) / 400.0))
+        scale = max(0.6, min(2.5, min(h_4k, w_4k) / 400.0))
 
         # Check Cache
         img_bytes = img_rgb.tobytes()
@@ -96,7 +101,7 @@ class ReviveGANEngine:
             return self._cache[cache_key]
 
         # -------------------------------------------------------------------
-        # Step 1: Ultra-Accurate Defect & Crack Inpainting
+        # Step 1: Ultra-Accurate Defect & Crack Inpainting on 4K Canvas
         # -------------------------------------------------------------------
         defect_mask = detect_scratches_and_defects(img_rgb, strength=defect_repair_strength)
         damaged_pixel_count = int(np.sum(defect_mask > 0))
@@ -115,20 +120,25 @@ class ReviveGANEngine:
         else:
             defaded_rgb = healed_rgb
 
-        # High-frequency detail sharpening
-        restored_sharp_rgb, _ = restore_high_frequency_details(defaded_rgb, strength=detail_enhancement)
+        # Restored Luminance Base Channel
+        gray_healed = cv2.cvtColor(defaded_rgb, cv2.COLOR_RGB2GRAY)
 
-        # Restored Luminance Channel (preserves original crisp facial features)
-        gray_healed = cv2.cvtColor(restored_sharp_rgb, cv2.COLOR_RGB2GRAY)
+        # -------------------------------------------------------------------
+        # Step 3: Multi-Scale 4K Octave Frequency Detail Synthesis
+        # Recovers fine skin pores, iris patterns, hair strands, and textiles
+        # -------------------------------------------------------------------
+        fine_factor = (detail_enhancement / 100.0) * 0.70 + 0.35
+        mid_factor = (detail_enhancement / 100.0) * 0.40 + 0.20
+        l_sharpened = synthesize_4k_octave_details(gray_healed, fine_boost=fine_factor, mid_boost=mid_factor)
 
-        # Subtle contrast enhancement
-        clahe = cv2.createCLAHE(clipLimit=1.4, tileGridSize=(8, 8))
-        l_clahe = clahe.apply(gray_healed)
-        l_final_u8 = cv2.addWeighted(gray_healed, 0.80, l_clahe, 0.20, 0)
+        # Dual-tile Adaptive Histogram Equalization for cinematic contrast
+        clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(12, 12))
+        l_clahe = clahe.apply(l_sharpened)
+        l_final_u8 = cv2.addWeighted(l_sharpened, 0.78, l_clahe, 0.22, 0)
         bw_restored_rgb = np.stack([l_final_u8, l_final_u8, l_final_u8], axis=-1)
 
         # -------------------------------------------------------------------
-        # Step 3: Neural Ensemble Colorization (SIGGRAPH17 + ECCV16)
+        # Step 4: Neural Ensemble Colorization (SIGGRAPH17 + ECCV16)
         # -------------------------------------------------------------------
         l_in = l_final_u8.astype(np.float32) * (100.0 / 255.0)
         l_rs = cv2.resize(l_in, (resolution, resolution), interpolation=cv2.INTER_AREA)
@@ -142,35 +152,39 @@ class ReviveGANEngine:
             w_sig = min(1.0, max(0.0, ensemble_blend))
             out_ab_tens = w_sig * out_sig + (1.0 - w_sig) * out_ecc
 
-            if (orig_h, orig_w) != (resolution, resolution):
-                out_ab_full = F.interpolate(out_ab_tens, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
+            if (h_4k, w_4k) != (resolution, resolution):
+                out_ab_full = F.interpolate(out_ab_tens, size=(h_4k, w_4k), mode="bilinear", align_corners=False)
             else:
                 out_ab_full = out_ab_tens
 
             out_ab_np = out_ab_full.squeeze(0).permute(1, 2, 0).cpu().numpy()
 
         # -------------------------------------------------------------------
-        # Step 4: Natural Skin Gamut Calibration & Eye Sclera Protection
+        # Step 5: Natural Gamut Calibration & Guided Edge Snapping
         # -------------------------------------------------------------------
-        # Natural skin tone calibration in CIELAB
+        # Natural human skin gamut calibration in CIELAB space
         a_ch = np.clip(out_ab_np[:, :, 0], -13.0, 15.0)
         b_ch = np.clip(out_ab_np[:, :, 1], -17.0, 20.0)
 
-        # Desaturate high-contrast facial contours (eyes, pupils, nostrils) to keep eyes crisp white
+        # Desaturate high-contrast facial contours (eyes, pupils, nostrils) to keep eyes clean white
         sobel = cv2.magnitude(cv2.Sobel(l_final_u8, cv2.CV_32F, 1, 0), cv2.Sobel(l_final_u8, cv2.CV_32F, 0, 1))
-        eye_desat_mask = (sobel > 40) & (l_in > 25) & (l_in < 80)
-        a_ch = np.where(eye_desat_mask, a_ch * 0.40, a_ch)
+        eye_desat_mask = (sobel > 45) & (l_in > 25) & (l_in < 80)
+        a_ch = np.where(eye_desat_mask, a_ch * 0.35, a_ch)
 
-        # Smooth photographic color gradients (eliminates block/facet artifacts)
-        k_smooth = max(5, int(9 * scale)) | 1
-        a_smooth = cv2.GaussianBlur(a_ch, (k_smooth, k_smooth), 2.5 * scale)
-        b_smooth = cv2.GaussianBlur(b_ch, (k_smooth, k_smooth), 2.5 * scale)
+        # Cross-Guided Edge Snapping: snaps chromatic boundaries to 4K luminance edges
+        a_snapped = fast_guided_filter(l_final_u8, a_ch, radius=int(8 * scale), eps=1e-3)
+        b_snapped = fast_guided_filter(l_final_u8, b_ch, radius=int(8 * scale), eps=1e-3)
 
-        a_cv = np.clip(a_smooth + 128.0, 0, 255).astype(np.uint8)
-        b_cv = np.clip(b_smooth + 128.0, 0, 255).astype(np.uint8)
+        a_cv = np.clip(a_snapped + 128.0, 0, 255).astype(np.uint8)
+        b_cv = np.clip(b_snapped + 128.0, 0, 255).astype(np.uint8)
 
         lab_final = cv2.merge([l_final_u8, a_cv, b_cv])
-        final_rgb = cv2.cvtColor(lab_final, cv2.COLOR_LAB2RGB)
+        colorized_rgb = cv2.cvtColor(lab_final, cv2.COLOR_LAB2RGB)
+
+        # -------------------------------------------------------------------
+        # Step 6: Organic Film Emulsion Micro-Grain Synthesis (Veo Realism)
+        # -------------------------------------------------------------------
+        final_rgb = synthesize_organic_film_grain(colorized_rgb, l_final_u8, grain_strength=2.8)
 
         total_latency_ms = round((time.time() - start_time) * 1000, 1)
 
