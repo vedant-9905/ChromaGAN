@@ -162,12 +162,13 @@ python evaluate.py --samples_dir assets/samples
 
 ## 🏛️ Sample Archival Showcase Gallery
 The project comes pre-packaged with authentic worn, torn, and damaged historical photographs in `assets/samples/`:
-- `worn_vintage_portrait.png` (Portrait with cracks, fold creases, and tears)
-- `scratched_old_city.png` (1930s Victorian street with film scratches and grain)
-- `torn_adams_landscape.jpg` (Ansel Adams landscape with severe diagonal fold and wear)
-- `classic_portrait.png`
-- `ansel_adams2.jpg`
-- `vintage_car.png`
+- `vintage_torn_portrait.png` (Iconic 1940s portrait with severe diagonal white fracture through face & hair)
+- `creased_native_woman.png` (Historic portrait with dense wire-like fold creases across facial features)
+- `crazed_archival_boy.png` (Childhood archival photo with dense spiderweb lacquer craquelure)
+- `damaged_archival_couple.png` (Vintage couple portrait with dark chemical gouges and emulsion peel)
+- `creased_1950s_gentleman.png` (1950s gentleman portrait with horizontal & vertical fold lines)
+- `torn_adams_landscape.jpg` (Ansel Adams mountain landscape with severe diagonal tear)
+
 
 ---
 

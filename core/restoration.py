@@ -1,31 +1,31 @@
 """
 core/restoration.py
 ===================
-Deep Archival Image Restoration & Defect Inpainting Engine.
+Ultra-Accurate Deep Archival Image Restoration & Defect Inpainting Engine.
 Provides:
-1. Automated multi-scale crack, scratch, fold crease, and tear detection.
-2. Fast Marching (Telea) & Navier-Stokes exemplar inpainting.
-3. High-frequency texture synthesis & facial feature unsharp enhancement.
+1. Scale-aware multi-resolution crack, scratch, fold crease, and tear detection.
+2. Fast Marching (Telea) & Navier-Stokes exemplar inpainting with boundary seam elimination.
+3. High-frequency micro-texture synthesis & facial detail enhancement.
 4. Archival de-fading, sepia neutralization, and adaptive dynamic range recovery.
-5. Diagnostic damage map generation for technical inspection.
+5. Diagnostic damage inspection map generation.
 """
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
-from typing import Tuple, Dict
+from typing import Tuple, Optional, Dict
 
 
 def detect_scratches_and_defects(
     img_bgr_or_gray: np.ndarray,
-    strength: float = 50.0,
+    strength: float = 60.0,
     min_defect_area: int = 4,
     max_scratch_width: int = 15,
 ) -> np.ndarray:
     """
-    Detects cracks, hairline scratches, tears, creases, and dust speckles using
-    multi-scale directional morphological filters and ridge thresholding.
+    Ultra-accurate, scale-aware detection of hairline scratches, deep tears,
+    fold creases, lacquer craquelure, and dark emulsion gouges.
     
     strength: 0.0 to 100.0 (controls detection sensitivity)
     Returns: binary uint8 mask where 255 = damaged pixel to repair.
@@ -41,57 +41,81 @@ def detect_scratches_and_defects(
         gray = img_bgr_or_gray.copy()
 
     h, w = gray.shape[:2]
+    # Resolution scaling factor (normalized to ~400px reference)
+    scale = max(0.4, min(2.0, min(h, w) / 400.0))
 
-    # Normalize sensitivity: strength 50 -> thresh ~ 18, strength 100 -> thresh ~ 8
-    # Lower threshold = more defects detected
-    thresh_val = max(6.0, 32.0 - (strength / 100.0) * 24.0)
+    # Sensitivity thresholds: higher strength -> lower threshold (more defects captured)
+    thresh_b = max(7.0, 30.0 - (strength / 100.0) * 22.0)
+    thresh_d = max(9.0, 34.0 - (strength / 100.0) * 22.0)
 
-    # 1. Multi-scale directional kernels to detect scratches at varying orientations
-    # Scratches are thin along one direction and elongated along another
-    k_len = max(5, int(7 * (max_scratch_width / 10.0)))
-    k_h = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
-    k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_len))
-    k_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (k_len, k_len))
+    # 1. Multi-scale directional kernels for cracks at varying widths and angles
+    k1 = max(3, int(5 * scale)) | 1
+    k2 = max(5, int(11 * scale)) | 1
+    k3 = max(7, int(19 * scale)) | 1
 
-    # Bright tears / scratches (Top-Hat transform: image - opening)
-    tophat_h = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_h)
-    tophat_v = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_v)
-    tophat_c = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k_cross)
-    bright_defects = cv2.max(cv2.max(tophat_h, tophat_v), tophat_c)
+    bright_accum = np.zeros_like(gray)
+    dark_accum = np.zeros_like(gray)
 
-    # Dark scratches / fold creases (Black-Hat transform: closing - image)
-    blackhat_h = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_h)
-    blackhat_v = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_v)
-    blackhat_c = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, k_cross)
-    dark_defects = cv2.max(cv2.max(blackhat_h, blackhat_v), blackhat_c)
+    for k_len in [k1, k2, k3]:
+        kh = cv2.getStructuringElement(cv2.MORPH_RECT, (k_len, 1))
+        kv = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k_len))
+        kc = cv2.getStructuringElement(cv2.MORPH_CROSS, (k_len, k_len))
 
-    # Combine bright and dark defects
-    defect_response = cv2.add(bright_defects, dark_defects)
+        # Top-Hat (bright cracks, white tears, paper creases)
+        th = cv2.max(
+            cv2.max(cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kh),
+                    cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kv)),
+            cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kc)
+        )
+        # Black-Hat (dark cracks, shadow fold edges, ink stains, gouges)
+        bh = cv2.max(
+            cv2.max(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kh),
+                    cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kv)),
+            cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kc)
+        )
 
-    # 2. Local gradient suppression: natural high-contrast scene edges
-    # (e.g. horizon or cheek contour) have strong first derivative in broad area,
-    # whereas scratches have high localized Laplacian/second derivative.
+        bright_accum = cv2.max(bright_accum, th)
+        dark_accum = cv2.max(dark_accum, bh)
+
+    # 2. Local contrast deviation from median filter
+    med_k = max(5, int(9 * scale)) | 1
+    med = cv2.medianBlur(gray, med_k)
+    loc_b = cv2.subtract(gray, med)
+    loc_d = cv2.subtract(med, gray)
+
+    # Weighted blend of directional morphology and local contrast difference
+    comb_b = cv2.addWeighted(bright_accum, 0.65, loc_b, 0.35, 0)
+    comb_d = cv2.addWeighted(dark_accum, 0.65, loc_d, 0.35, 0)
+
+    # 3. Continuous Scene Edge Suppression:
+    # Natural scene boundaries (eyebrows, lips, jawline, clothing outlines) have
+    # continuous broad gradient magnitude. Scratches have localized impulsive second derivatives.
     sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-    grad_mag = cv2.magnitude(sobelx, sobely)
+    sobel_mag = cv2.magnitude(sobelx, sobely)
+    edge_suppress = cv2.GaussianBlur(sobel_mag, (15, 15), 0)
 
-    # Suppress defects that coincide with very broad continuous boundaries
-    # by subtracting blurred gradient magnitude
-    broad_edges = cv2.GaussianBlur(grad_mag, (15, 15), 0)
-    suppressed = np.clip(defect_response.astype(np.float32) - 0.25 * broad_edges, 0, 255).astype(np.uint8)
+    score_b = np.clip(comb_b.astype(np.float32) - 0.22 * edge_suppress, 0, 255).astype(np.uint8)
+    score_d = np.clip(comb_d.astype(np.float32) - 0.22 * edge_suppress, 0, 255).astype(np.uint8)
 
-    # Threshold to binary mask
-    _, binary_mask = cv2.threshold(suppressed, int(thresh_val), 255, cv2.THRESH_BINARY)
+    # Thresholding
+    _, mb = cv2.threshold(score_b, int(thresh_b), 255, cv2.THRESH_BINARY)
+    _, md = cv2.threshold(score_d, int(thresh_d), 255, cv2.THRESH_BINARY)
+    defect_mask = cv2.bitwise_or(mb, md)
 
-    # 3. Clean up noise: remove tiny single pixel noise, dilate slightly to cover tear boundary
-    # Remove single isolated pixels
-    clean_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
+    # 4. Clean up noise: open to eliminate isolated single pixels
+    defect_mask = cv2.morphologyEx(
+        defect_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    )
 
-    # Dilate slightly so inpainting covers faded scratch edges
-    dilation_radius = 2 if strength < 70 else 3
+    # 5. Scale-aware Dilation:
+    # Ensures the partially faded borders of tears/scratches are fully covered
+    d_rad = max(2, int(3.2 * scale))
     defect_mask = cv2.dilate(
-        clean_mask,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_radius, dilation_radius)),
+        defect_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d_rad, d_rad)),
         iterations=1
     )
 
@@ -101,29 +125,45 @@ def detect_scratches_and_defects(
 def inpaint_scratches(
     img_rgb: np.ndarray,
     defect_mask: np.ndarray,
-    inpaint_radius: int = 3,
+    inpaint_radius: Optional[int] = None,
     method: str = "telea",
 ) -> np.ndarray:
     """
-    Seamlessly reconstructs pixels covered by defect_mask using Telea or Navier-Stokes inpainting.
-    img_rgb: uint8 RGB numpy array
-    defect_mask: uint8 single channel binary mask (255 = inpaint)
+    Seamlessly reconstructs pixels covered by defect_mask using Telea or Navier-Stokes inpainting,
+    followed by boundary seam-elimination filtering.
     """
     if defect_mask is None or np.sum(defect_mask > 0) == 0:
         return img_rgb.copy()
 
-    # OpenCV inpainting requires BGR
+    h, w = img_rgb.shape[:2]
+    scale = max(0.4, min(2.0, min(h, w) / 400.0))
+
+    if inpaint_radius is None:
+        inpaint_radius = max(3, int(4.5 * scale))
+
+    # OpenCV inpainting expects BGR
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
     flag = cv2.INPAINT_TELEA if method.lower() == "telea" else cv2.INPAINT_NS
     inpainted_bgr = cv2.inpaint(img_bgr, defect_mask, inpaintRadius=inpaint_radius, flags=flag)
+
+    # Boundary seam-elimination: smooth transition between inpainted regions and original canvas
+    seam_ring = cv2.dilate(defect_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    seam_ring = cv2.subtract(seam_ring, cv2.erode(defect_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))))
+
+    if np.sum(seam_ring > 0) > 0:
+        smoothed_bgr = cv2.bilateralFilter(inpainted_bgr, d=5, sigmaColor=30, sigmaSpace=30)
+        ring_float = (seam_ring.astype(np.float32) / 255.0)[:, :, None]
+        final_bgr = ((1.0 - 0.45 * ring_float) * inpainted_bgr.astype(np.float32) +
+                     (0.45 * ring_float) * smoothed_bgr.astype(np.float32))
+        inpainted_bgr = np.clip(final_bgr, 0, 255).astype(np.uint8)
 
     return cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
 
 
 def restore_high_frequency_details(
     img_rgb_or_l: np.ndarray,
-    strength: float = 35.0,
+    strength: float = 40.0,
     face_clarity: bool = True,
 ) -> Tuple[np.ndarray, float]:
     """
@@ -215,25 +255,18 @@ def generate_damage_diagnostic_map(
     Repaired defects glow in electric cyan (#06b6d4) and amber (#f59e0b).
     """
     h, w = img_rgb.shape[:2]
-    # Subtle monochrome background
     gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
     bg_mono = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB).astype(np.float32) * 0.45
 
     if defect_mask is None or np.sum(defect_mask > 0) == 0:
-        # Return subtle background with "No Severe Defects" indication
         return np.clip(bg_mono, 0, 255).astype(np.uint8)
 
-    # Defect overlay in vivid cyan and amber
     overlay = bg_mono.copy()
     mask_bool = defect_mask > 0
 
-    # Outer boundary glow
     contour_mask = cv2.dilate(defect_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))) > 0
     overlay[contour_mask] = [245, 158, 11]  # Amber glow contour
-
-    # Core defect fill
     overlay[mask_bool] = [6, 182, 212]      # Electric cyan core
 
-    # Alpha blend
     blended = 0.35 * bg_mono + 0.65 * overlay
     return np.clip(blended, 0, 255).astype(np.uint8)

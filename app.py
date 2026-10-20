@@ -45,12 +45,12 @@ print("[ReviveGAN] Initializing neural models and restoration pipeline...")
 get_models()
 
 SAMPLE_PATHS = [
-    "assets/samples/worn_vintage_portrait.png",
-    "assets/samples/scratched_old_city.png",
+    "assets/samples/vintage_torn_portrait.png",
+    "assets/samples/creased_native_woman.png",
+    "assets/samples/crazed_archival_boy.png",
+    "assets/samples/damaged_archival_couple.png",
+    "assets/samples/creased_1950s_gentleman.png",
     "assets/samples/torn_adams_landscape.jpg",
-    "assets/samples/classic_portrait.png",
-    "assets/samples/ansel_adams2.jpg",
-    "assets/samples/vintage_car.png",
 ]
 
 def _prewarm_samples_async() -> None:
@@ -663,12 +663,12 @@ with gr.Blocks(title="ReviveGAN Studio Pro — AI Archival Restoration") as demo
     gr.Markdown("### 🏛️ Archival Showcase Gallery (Authentic Worn & Torn Historical Photos — Instant < 1ms Preview)")
     examples = gr.Examples(
         examples=[
-            ["assets/samples/worn_vintage_portrait.png", "🌟 Master Archival Revival"],
-            ["assets/samples/scratched_old_city.png", "🌟 Master Archival Revival"],
-            ["assets/samples/torn_adams_landscape.jpg", "🌟 Master Archival Revival"],
-            ["assets/samples/classic_portrait.png", "💎 Ultra-HD Portrait Clarity"],
-            ["assets/samples/ansel_adams2.jpg", "🏛️ Pristine Museum Monochrome"],
-            ["assets/samples/vintage_car.png", "🎨 Technicolor Cinema Vivid"],
+            ["assets/samples/vintage_torn_portrait.png", "🌟 Master Archival Revival"],
+            ["assets/samples/creased_native_woman.png", "🌟 Master Archival Revival"],
+            ["assets/samples/crazed_archival_boy.png", "💎 Ultra-HD Portrait Clarity"],
+            ["assets/samples/damaged_archival_couple.png", "🌟 Master Archival Revival"],
+            ["assets/samples/creased_1950s_gentleman.png", "🌟 Master Archival Revival"],
+            ["assets/samples/torn_adams_landscape.jpg", "🏛️ Pristine Museum Monochrome"],
         ],
         inputs=[upload_input, relive_mode_choice],
         label="Click any historical archival photograph to test full restoration & reliving instantly",
@@ -760,7 +760,18 @@ if __name__ == "__main__":
         except Exception:
             return "localhost"
 
-    port = int(os.environ.get("PORT", 3003))
+    def _find_free_port(preferred: int = 3003, max_tries: int = 10) -> int:
+        for p in range(preferred, preferred + max_tries):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("0.0.0.0", p))
+                    return p
+                except OSError:
+                    continue
+        return preferred
+
+    desired_port = int(os.environ.get("PORT", 3003))
+    port = _find_free_port(desired_port)
     lan_ip = _get_lan_ip()
     share = "--share" in sys.argv or os.environ.get("SHARE", "false").lower() in ("true", "1")
 
