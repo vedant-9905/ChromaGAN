@@ -67,5 +67,6 @@ chromagan_master_export.*
 test_colorized.png
 chromagan_studio_export.*
 revivegan_master_restoration.*
+revivegan_restored.png
 assets/samples/test_restored_output.png
 

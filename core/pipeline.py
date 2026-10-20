@@ -1,23 +1,19 @@
 """
 core/pipeline.py
 ================
-ReviveGAN Studio Pro — Deep Neural Archival Restoration & Generative Relive Engine.
+ReviveGAN Studio Pro — Ultra-High Processing Archival Restoration Engine.
 Combines:
-1. Automated multi-scale crack, scratch, fold crease, and tear detection & inpainting.
-2. High-frequency micro-texture synthesis & facial feature unsharp enhancement.
-3. Archival de-fading, sepia neutralization, and adaptive dynamic range recovery.
-4. Zhang et al. (SIGGRAPH17 & ECCV16) SOTA neural ensemble colorization.
-5. Edge-preserving anti-bleed guided filtering.
-6. Studio color grading (Temperature, Tint, Vibrance, Saturation, Skin Tone Protect).
-7. Diagnostic damage inspection mapping & real-time telemetry (Sharpness gain, Defect %, Latency).
+1. Multi-scale Laplacian ridge & directional defect inpainting (Telea Fast Marching).
+2. Natural human skin tone gamut calibration (anti-oversaturation, clear eyes).
+3. SOTA Dual Neural Ensemble Colorization (SIGGRAPH17 + ECCV16).
+4. Bilateral edge snapping for zero color bleed.
 """
 
 from __future__ import annotations
 
-import math
 import os
 import time
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -31,12 +27,7 @@ from core.restoration import (
     inpaint_scratches,
     restore_high_frequency_details,
     defade_and_neutralize_sepia,
-    generate_damage_diagnostic_map,
 )
-
-# ---------------------------------------------------------------------------
-# Device & Model Cache
-# ---------------------------------------------------------------------------
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -48,322 +39,14 @@ def get_models() -> Tuple[torch.nn.Module, torch.nn.Module]:
     """Lazy-loads and caches both pre-trained models on DEVICE."""
     global _model_sig, _model_ecc
     if _model_sig is None:
-        print(f"[ReviveGAN Engine] Loading SIGGRAPH17 model on {DEVICE}...")
         _model_sig = siggraph17(pretrained=True).eval().to(DEVICE)
     if _model_ecc is None:
-        print(f"[ReviveGAN Engine] Loading ECCV16 model on {DEVICE}...")
         _model_ecc = eccv16(pretrained=True).eval().to(DEVICE)
     return _model_sig, _model_ecc
 
 
-# ---------------------------------------------------------------------------
-# Presets Definition (Relive Modes & Styles)
-# ---------------------------------------------------------------------------
-
-RELIVE_MODES = {
-    "🌟 Master Archival Revival": {
-        "defect_repair": 60.0,
-        "detail_enhancement": 45.0,
-        "defade_strength": 40.0,
-        "model_choice": "Hybrid SOTA Ensemble",
-        "ensemble_blend": 0.65,
-        "clahe": 20.0,
-        "temperature": 2.0,
-        "tint": 0.0,
-        "vibrance": 22.0,
-        "saturation": 1.18,
-        "film_grain": 0.0,
-        "vignette": 0.0,
-        "description": "Full end-to-end revival: inpaint scratches/tears, boost clarity, de-fade, and neural colorize.",
-    },
-    "💎 Ultra-HD Portrait Clarity": {
-        "defect_repair": 65.0,
-        "detail_enhancement": 65.0,
-        "defade_strength": 45.0,
-        "model_choice": "Portrait SOTA (SIGGRAPH17)",
-        "ensemble_blend": 1.0,
-        "clahe": 25.0,
-        "temperature": 5.0,
-        "tint": 2.0,
-        "vibrance": 18.0,
-        "saturation": 1.10,
-        "film_grain": 0.0,
-        "vignette": 0.0,
-        "description": "Aggressive face and micro-texture sharpening with natural human skin tones.",
-    },
-    "🎞️ Vintage 1960s Kodachrome": {
-        "defect_repair": 55.0,
-        "detail_enhancement": 35.0,
-        "defade_strength": 30.0,
-        "model_choice": "Hybrid SOTA Ensemble",
-        "ensemble_blend": 0.70,
-        "clahe": 25.0,
-        "temperature": 18.0,
-        "tint": 4.0,
-        "vibrance": 32.0,
-        "saturation": 1.25,
-        "film_grain": 10.0,
-        "vignette": 12.0,
-        "description": "Authentic mid-century warm film colors with rich shadows and healed defect creases.",
-    },
-    "🏛️ Pristine Museum Monochrome": {
-        "defect_repair": 70.0,
-        "detail_enhancement": 55.0,
-        "defade_strength": 55.0,
-        "model_choice": "None (Pure Archival Monochrome)",
-        "ensemble_blend": 0.50,
-        "clahe": 30.0,
-        "temperature": 0.0,
-        "tint": 0.0,
-        "vibrance": 0.0,
-        "saturation": 0.0,
-        "film_grain": 0.0,
-        "vignette": 0.0,
-        "description": "Museum conservation: inpaint tears and cracks, razor-sharp silver-halide contrast.",
-    },
-    "🎨 Technicolor Cinema Vivid": {
-        "defect_repair": 50.0,
-        "detail_enhancement": 40.0,
-        "defade_strength": 35.0,
-        "model_choice": "Vibrant Scenery (ECCV16)",
-        "ensemble_blend": 0.20,
-        "clahe": 28.0,
-        "temperature": 8.0,
-        "tint": -3.0,
-        "vibrance": 42.0,
-        "saturation": 1.42,
-        "film_grain": 4.0,
-        "vignette": 8.0,
-        "description": "Vibrant 3-strip Technicolor cinema palette for breathtaking vintage outdoor scenes.",
-    },
-}
-
-# Backward compatibility alias
-PRESETS = RELIVE_MODES
-
-
-# ---------------------------------------------------------------------------
-# Metrics & Analytics
-# ---------------------------------------------------------------------------
-
-def compute_colorfulness(img_rgb: np.ndarray) -> Tuple[float, str]:
-    """
-    Hasler & Süsstrunk (2003) colorfulness metric:
-    M = sqrt(sigma_rg^2 + sigma_yb^2) + 0.3 * sqrt(mu_rg^2 + mu_yb^2)
-    """
-    img_f = img_rgb.astype(np.float32)
-    r = img_f[:, :, 0]
-    g = img_f[:, :, 1]
-    b = img_f[:, :, 2]
-
-    rg = np.abs(r - g)
-    yb = np.abs(0.5 * (r + g) - b)
-
-    std_rg, mean_rg = float(np.std(rg)), float(np.mean(rg))
-    std_yb, mean_yb = float(np.std(yb)), float(np.mean(yb))
-
-    std_root = math.sqrt(std_rg**2 + std_yb**2)
-    mean_root = math.sqrt(mean_rg**2 + mean_yb**2)
-
-    score = round(std_root + 0.3 * mean_root, 1)
-
-    if score < 5:
-        desc = "Pristine Monochrome"
-    elif score < 18:
-        desc = "Subtle / Desaturated"
-    elif score < 35:
-        desc = "Natural Archival"
-    elif score < 55:
-        desc = "Rich & Balanced"
-    elif score < 80:
-        desc = "Vivid Saturated"
-    else:
-        desc = "Ultra High Dynamic Color"
-
-    return score, desc
-
-
-def generate_turbo_heatmap(a_u8: np.ndarray, b_u8: np.ndarray) -> np.ndarray:
-    """Computes chromatic deviation magnitude and maps it to Turbo colormap."""
-    a_dev = a_u8.astype(np.float32) - 128.0
-    b_dev = b_u8.astype(np.float32) - 128.0
-    magnitude = np.sqrt(a_dev**2 + b_dev**2)
-    norm = np.clip((magnitude / 85.0) * 255.0, 0, 255).astype(np.uint8)
-    heatmap_bgr = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
-    return cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
-
-
-# ---------------------------------------------------------------------------
-# Pre-Processing: Archival Vintage Contrast & Tone
-# ---------------------------------------------------------------------------
-
-def restore_archival_luminance(
-    img_l_orig: np.ndarray,
-    clahe_strength: float = 0.0,
-    denoise_strength: float = 0.0,
-    exposure: float = 0.0,
-) -> np.ndarray:
-    """Applies CLAHE local contrast enhancement, denoise, and exposure adjustment."""
-    l_mod = img_l_orig.copy()
-
-    # 1. Exposure / Gamma Adjustment
-    if abs(exposure) > 0.5:
-        gamma = math.pow(2.0, -exposure / 50.0)
-        norm_l = np.clip(l_mod / 100.0, 0.0, 1.0)
-        l_mod = np.power(norm_l, gamma) * 100.0
-
-    # 2. Denoise
-    if denoise_strength > 1.0:
-        sigma = (denoise_strength / 100.0) * 2.0
-        l_mod = cv2.GaussianBlur(l_mod, (0, 0), sigmaX=sigma, sigmaY=sigma)
-
-    # 3. CLAHE local adaptive contrast enhancement
-    if clahe_strength > 1.0:
-        l_u8 = np.clip(l_mod * 2.55, 0, 255).astype(np.uint8)
-        clip_limit = 1.0 + (clahe_strength / 100.0) * 3.5
-        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-        l_clahe = clahe.apply(l_u8).astype(np.float32) / 2.55
-        blend_factor = clahe_strength / 100.0
-        l_mod = (1.0 - blend_factor) * l_mod + blend_factor * l_clahe
-
-    return np.clip(l_mod, 0.0, 100.0)
-
-
-# ---------------------------------------------------------------------------
-# Anti-Bleed Edge-Preserving Guided Filter
-# ---------------------------------------------------------------------------
-
-def apply_edge_snap(
-    out_ab_np: np.ndarray,
-    l_orig_np: np.ndarray,
-    strength: float = 0.35,
-) -> np.ndarray:
-    """Uses bilateral edge-preserving filtering on (a, b) channels to prevent color bleeding."""
-    if strength <= 0.05:
-        return out_ab_np
-
-    a_ch = np.clip(out_ab_np[:, :, 0] + 128.0, 0, 255).astype(np.uint8)
-    b_ch = np.clip(out_ab_np[:, :, 1] + 128.0, 0, 255).astype(np.uint8)
-
-    d = 7
-    sigma_color = 25.0 + strength * 50.0
-    sigma_space = 25.0 + strength * 50.0
-
-    a_filt = cv2.bilateralFilter(a_ch, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space).astype(np.float32) - 128.0
-    b_filt = cv2.bilateralFilter(b_ch, d=d, sigmaColor=sigma_color, sigmaSpace=sigma_space).astype(np.float32) - 128.0
-
-    blend = min(1.0, max(0.0, strength))
-    a_res = (1.0 - blend) * out_ab_np[:, :, 0] + blend * a_filt
-    b_res = (1.0 - blend) * out_ab_np[:, :, 1] + blend * b_filt
-
-    return np.stack([a_res, b_res], axis=-1)
-
-
-# ---------------------------------------------------------------------------
-# Pro Studio Color Grading & Finishing
-# ---------------------------------------------------------------------------
-
-def apply_studio_color_grading(
-    out_ab: np.ndarray,
-    l_orig: np.ndarray,
-    temperature: float = 0.0,
-    tint: float = 0.0,
-    vibrance: float = 0.0,
-    saturation: float = 1.0,
-    protect_skin: bool = True,
-    film_grain: float = 0.0,
-    vignette: float = 0.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Applies non-linear color grading in CIELAB, converts to sRGB, and adds optical finish."""
-    a = out_ab[:, :, 0].copy()
-    b = out_ab[:, :, 1].copy()
-
-    # 1. Skin Tone Mask
-    if protect_skin:
-        skin_weight = np.clip((a - 6.0) * (32.0 - a) * (b - 8.0) * (42.0 - b) / 1000.0, 0.0, 1.0)
-    else:
-        skin_weight = np.zeros_like(a)
-
-    # 2. Temperature shift
-    temp_factor = temperature / 100.0
-    b_temp_shift = temp_factor * 18.0
-    a_temp_shift = temp_factor * 5.0
-    if protect_skin and temp_factor < 0:
-        a_temp_shift *= (1.0 - 0.7 * skin_weight)
-        b_temp_shift *= (1.0 - 0.7 * skin_weight)
-    a += a_temp_shift
-    b += b_temp_shift
-
-    # 3. Tint shift
-    tint_factor = tint / 100.0
-    a_tint_shift = tint_factor * 16.0
-    if protect_skin:
-        a_tint_shift *= (1.0 - 0.5 * skin_weight)
-    a += a_tint_shift
-
-    # 4. Adobe-style Smart Vibrance
-    if abs(vibrance) > 0.5:
-        chroma_radius = np.sqrt(a**2 + b**2)
-        vibe_factor = vibrance / 100.0
-        vibe_boost = vibe_factor * np.clip(1.0 - (chroma_radius / 70.0), 0.0, 1.0)
-        if protect_skin and vibe_factor > 0:
-            vibe_boost *= (1.0 - 0.45 * skin_weight)
-        a *= (1.0 + vibe_boost)
-        b *= (1.0 + vibe_boost)
-
-    # 5. Global Saturation Multiplier
-    if abs(saturation - 1.0) > 0.01:
-        a *= saturation
-        b *= saturation
-
-    # 6. Clip to valid CIELAB ranges
-    a = np.clip(a, -127.0, 127.0)
-    b = np.clip(b, -127.0, 127.0)
-
-    # 7. Convert to sRGB via OpenCV Lab2RGB (high performance C++)
-    l_cv = np.clip(l_orig * 2.55, 0.0, 255.0).astype(np.uint8)
-    a_cv = np.clip(a + 128.0, 0.0, 255.0).astype(np.uint8)
-    b_cv = np.clip(b + 128.0, 0.0, 255.0).astype(np.uint8)
-
-    lab_cv = cv2.merge([l_cv, a_cv, b_cv])
-    rgb_cv = cv2.cvtColor(lab_cv, cv2.COLOR_LAB2RGB).astype(np.float32)
-
-    # 8. Analog Silver Halide Film Grain
-    if film_grain > 1.0:
-        grain_scale = (film_grain / 100.0) * 16.0
-        noise = np.random.normal(0.0, grain_scale, rgb_cv.shape).astype(np.float32)
-        l_norm = (l_cv.astype(np.float32) / 255.0)[:, :, None]
-        midtone_weight = 4.0 * l_norm * (1.0 - l_norm)
-        rgb_cv = rgb_cv + noise * midtone_weight
-
-    # 9. Optical Vintage Vignette
-    if vignette > 1.0:
-        h, w = rgb_cv.shape[:2]
-        y_c, x_c = h / 2.0, w / 2.0
-        y, x = np.ogrid[:h, :w]
-        dist_sq = ((x - x_c) / x_c) ** 2 + ((y - y_c) / y_c) ** 2
-        vignette_amount = (vignette / 100.0) * 0.55
-        vignette_mask = 1.0 - vignette_amount * np.clip(dist_sq / 2.0, 0.0, 1.0)
-        rgb_cv = rgb_cv * vignette_mask[:, :, None]
-
-    rgb_u8 = np.clip(rgb_cv, 0.0, 255.0).astype(np.uint8)
-    return rgb_u8, a_cv, b_cv
-
-
-# ---------------------------------------------------------------------------
-# Master ReviveGAN Engine
-# ---------------------------------------------------------------------------
-
 class ReviveGANEngine:
-    """
-    Production Archival Photo Restoration, Defect Healing & Neural Relive Engine.
-    Executes full multi-stage pipeline:
-    1. Defect & tear localization (scratches, folds, paper tears, dust speckles)
-    2. Fast Marching / Navier-Stokes inpainting
-    3. High-frequency micro-texture & facial detail enhancement
-    4. Archival de-fading & sepia neutralization
-    5. Dual neural ensemble colorization & CIELAB studio finishing
-    """
+    """Production Archival Photo Restoration & Defect Inpainting Engine."""
 
     def __init__(self):
         self.device = DEVICE
@@ -374,233 +57,141 @@ class ReviveGANEngine:
     def restore_and_relive(
         self,
         input_image: np.ndarray,
-        relive_mode: str = "🌟 Master Archival Revival",
-        defect_repair_strength: float = 60.0,
-        detail_enhancement: float = 45.0,
-        defade_strength: float = 40.0,
-        colorization_model: str = "Hybrid SOTA Ensemble",
+        defect_repair_strength: float = 70.0,
+        detail_enhancement: float = 35.0,
+        defade_strength: float = 30.0,
+        ensemble_blend: float = 0.75,
         resolution: int = 256,
-        ensemble_blend: float = 0.65,
-        clahe_strength: float = 20.0,
-        denoise_strength: float = 0.0,
-        exposure: float = 0.0,
-        edge_snap: float = 0.35,
-        temperature: float = 0.0,
-        tint: float = 0.0,
-        vibrance: float = 22.0,
-        saturation: float = 1.18,
-        protect_skin: bool = True,
-        film_grain: float = 0.0,
-        vignette: float = 0.0,
     ) -> Dict:
         """
-        Executes complete end-to-end archival restoration and neural reliving.
+        Executes ultra-accurate defect inpainting, natural skin colorization,
+        and high-frequency detail restoration.
         """
         if input_image is None:
             return {}
 
         start_time = time.time()
 
-        # Ensure 3-channel RGB array
         if input_image.ndim == 2:
             img_rgb = np.tile(input_image[:, :, None], 3)
         else:
             img_rgb = input_image[:, :, :3]
 
         orig_h, orig_w = img_rgb.shape[:2]
+        scale = max(0.4, min(2.0, min(orig_h, orig_w) / 400.0))
 
         # Check Cache
         img_bytes = img_rgb.tobytes()
-        cache_key = (
-            hash(img_bytes),
-            relive_mode,
-            round(defect_repair_strength, 1),
-            round(detail_enhancement, 1),
-            round(defade_strength, 1),
-            colorization_model,
-            resolution,
-            round(ensemble_blend, 2),
-            round(clahe_strength, 1),
-            round(vibrance, 1),
-            round(saturation, 2),
-        )
-
+        cache_key = (hash(img_bytes), round(defect_repair_strength, 1), round(detail_enhancement, 1))
         if cache_key in self._cache:
-            res = dict(self._cache[cache_key])
-            res["latency_ms"] = 0.6
-            res["from_cache"] = True
-            return res
+            return self._cache[cache_key]
 
         # -------------------------------------------------------------------
-        # Stage 1: Defect & Tear Detection (Cracks, Scratches, Creases, Dust)
+        # Step 1: Ultra-Accurate Defect & Crack Inpainting
         # -------------------------------------------------------------------
-        defect_mask = detect_scratches_and_defects(
-            img_rgb,
-            strength=defect_repair_strength,
-        )
+        defect_mask = detect_scratches_and_defects(img_rgb, strength=defect_repair_strength)
         damaged_pixel_count = int(np.sum(defect_mask > 0))
-        total_pixels = orig_h * orig_w
-        defect_pct = round((damaged_pixel_count / max(1, total_pixels)) * 100.0, 2)
 
-        # -------------------------------------------------------------------
-        # Stage 2: Exemplar & Fast-Marching Inpainting (Crack Healing)
-        # -------------------------------------------------------------------
-        if defect_repair_strength > 1.0 and damaged_pixel_count > 0:
-            healed_rgb = inpaint_scratches(img_rgb, defect_mask, inpaint_radius=3, method="telea")
+        if damaged_pixel_count > 0:
+            r_inpaint = max(3, int(4.0 * scale))
+            healed_rgb = inpaint_scratches(img_rgb, defect_mask, inpaint_radius=r_inpaint, method="telea")
         else:
             healed_rgb = img_rgb.copy()
 
         # -------------------------------------------------------------------
-        # Stage 3: Archival De-Fading & Sepia Neutralization
+        # Step 2: Archival De-fading & Dynamic Range Balancing
         # -------------------------------------------------------------------
         if defade_strength > 1.0:
             defaded_rgb = defade_and_neutralize_sepia(healed_rgb, defade_strength=defade_strength)
         else:
             defaded_rgb = healed_rgb
 
-        # -------------------------------------------------------------------
-        # Stage 4: High-Frequency Detail & Texture Synthesis (Face/Texture Sharpening)
-        # -------------------------------------------------------------------
-        restored_sharp_rgb, sharpness_gain = restore_high_frequency_details(
-            defaded_rgb,
-            strength=detail_enhancement,
-            face_clarity=True,
-        )
+        # High-frequency detail sharpening
+        restored_sharp_rgb, _ = restore_high_frequency_details(defaded_rgb, strength=detail_enhancement)
 
-        # Restored high-definition monochrome
-        gray_restored = cv2.cvtColor(restored_sharp_rgb, cv2.COLOR_RGB2GRAY)
-        l_orig = gray_restored.astype(np.float32) * (100.0 / 255.0)
+        # Restored Luminance Channel
+        gray_healed = cv2.cvtColor(restored_sharp_rgb, cv2.COLOR_RGB2GRAY)
 
-        # Archival Luminance CLAHE & Exposure Curve
-        l_restored = restore_archival_luminance(
-            l_orig,
-            clahe_strength=clahe_strength,
-            denoise_strength=denoise_strength,
-            exposure=exposure,
-        )
-
-        bw_restored_u8 = np.clip(l_restored * 2.55, 0, 255).astype(np.uint8)
-        bw_restored_rgb = np.stack([bw_restored_u8, bw_restored_u8, bw_restored_u8], axis=-1)
+        # Subtle contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(gray_healed)
+        l_final_u8 = cv2.addWeighted(gray_healed, 0.75, l_clahe, 0.25, 0)
+        bw_restored_rgb = np.stack([l_final_u8, l_final_u8, l_final_u8], axis=-1)
 
         # -------------------------------------------------------------------
-        # Stage 5: SOTA Neural Ensemble Colorization (Zhang SIGGRAPH17 + ECCV16)
+        # Step 3: Neural Ensemble Colorization (SIGGRAPH17 + ECCV16)
         # -------------------------------------------------------------------
-        is_monochrome_mode = (
-            colorization_model == "None (Pure Archival Monochrome)"
-            or relive_mode == "🏛️ Pristine Museum Monochrome"
-        )
+        l_in = l_final_u8.astype(np.float32) * (100.0 / 255.0)
+        l_rs = cv2.resize(l_in, (resolution, resolution), interpolation=cv2.INTER_AREA)
+        tens_rs_l = torch.from_numpy(l_rs).unsqueeze(0).unsqueeze(0).float().to(self.device)
 
-        if not is_monochrome_mode:
-            # Neural tensor preparation (256x256 native)
-            l_rs = cv2.resize(l_restored, (resolution, resolution), interpolation=cv2.INTER_AREA)
-            tens_rs_l = torch.from_numpy(l_rs).unsqueeze(0).unsqueeze(0).float().to(self.device)
+        m_sig, m_ecc = get_models()
 
-            m_sig, m_ecc = get_models()
+        with torch.inference_mode():
+            out_sig = m_sig(tens_rs_l)
+            out_ecc = m_ecc(tens_rs_l)
+            w_sig = min(1.0, max(0.0, ensemble_blend))
+            out_ab_tens = w_sig * out_sig + (1.0 - w_sig) * out_ecc
 
-            with torch.inference_mode():
-                if colorization_model == "Portrait SOTA (SIGGRAPH17)":
-                    out_ab_tens = m_sig(tens_rs_l)
-                elif colorization_model == "Vibrant Scenery (ECCV16)":
-                    out_ab_tens = m_ecc(tens_rs_l)
-                else:  # Hybrid Ensemble
-                    w_sig = min(1.0, max(0.0, ensemble_blend))
-                    w_ecc = 1.0 - w_sig
-                    out_ab_tens = w_sig * m_sig(tens_rs_l) + w_ecc * m_ecc(tens_rs_l)
+            if (orig_h, orig_w) != (resolution, resolution):
+                out_ab_full = F.interpolate(out_ab_tens, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
+            else:
+                out_ab_full = out_ab_tens
 
-                if (orig_h, orig_w) != (resolution, resolution):
-                    out_ab_full = F.interpolate(out_ab_tens, size=(orig_h, orig_w), mode="bilinear", align_corners=False)
-                else:
-                    out_ab_full = out_ab_tens
-
-                out_ab_np = out_ab_full.squeeze(0).permute(1, 2, 0).cpu().numpy()
-
-            # Anti-bleed edge-preserving guided filtering
-            if edge_snap > 0.05:
-                out_ab_np = apply_edge_snap(out_ab_np, l_restored, strength=edge_snap)
-
-            # Pro Studio Color Grading
-            final_masterpiece_rgb, a_u8, b_u8 = apply_studio_color_grading(
-                out_ab=out_ab_np,
-                l_orig=l_restored,
-                temperature=temperature,
-                tint=tint,
-                vibrance=vibrance,
-                saturation=saturation,
-                protect_skin=protect_skin,
-                film_grain=film_grain,
-                vignette=vignette,
-            )
-        else:
-            # Pristine Museum Monochrome (Pure B&W)
-            final_masterpiece_rgb = bw_restored_rgb
-            out_ab_np = np.zeros((orig_h, orig_w, 2), dtype=np.float32)
-            a_u8 = np.full((orig_h, orig_w), 128, dtype=np.uint8)
-            b_u8 = np.full((orig_h, orig_w), 128, dtype=np.uint8)
+            out_ab_np = out_ab_full.squeeze(0).permute(1, 2, 0).cpu().numpy()
 
         # -------------------------------------------------------------------
-        # Stage 6: Technical Diagnostics & Metrics
+        # Step 4: Natural Skin Gamut Calibration & Eye Sclera Protection
         # -------------------------------------------------------------------
-        damage_map_rgb = generate_damage_diagnostic_map(img_rgb, defect_mask)
-        heatmap_rgb = generate_turbo_heatmap(a_u8, b_u8)
-        colorfulness_score, colorfulness_label = compute_colorfulness(final_masterpiece_rgb)
+        # Strictly clamp 'a' (red) to natural human threshold [-14.0, 13.0]
+        # and 'b' (yellow) to [-18.0, 20.0] to prevent red clown blotches
+        a_ch = np.clip(out_ab_np[:, :, 0], -14.0, 13.0)
+        b_ch = np.clip(out_ab_np[:, :, 1], -18.0, 20.0)
+
+        # Desaturate high-contrast facial contours (eyes, pupils, nostrils)
+        sobel = cv2.magnitude(cv2.Sobel(l_final_u8, cv2.CV_32F, 1, 0), cv2.Sobel(l_final_u8, cv2.CV_32F, 0, 1))
+        eye_desat_mask = (sobel > 40) & (l_in > 25) & (l_in < 80)
+        a_ch = np.where(eye_desat_mask, a_ch * 0.40, a_ch)
+
+        # Snap colors to high-resolution luminance edges with bilateral filter
+        a_cv = np.clip(a_ch + 128.0, 0, 255).astype(np.uint8)
+        b_cv = np.clip(b_ch + 128.0, 0, 255).astype(np.uint8)
+
+        a_cv = cv2.bilateralFilter(a_cv, d=7, sigmaColor=35, sigmaSpace=35)
+        b_cv = cv2.bilateralFilter(b_cv, d=7, sigmaColor=35, sigmaSpace=35)
+
+        lab_final = cv2.merge([l_final_u8, a_cv, b_cv])
+        final_rgb = cv2.cvtColor(lab_final, cv2.COLOR_LAB2RGB)
 
         total_latency_ms = round((time.time() - start_time) * 1000, 1)
 
         result_dict = {
             "original_damaged_rgb": img_rgb,
+            "final_masterpiece_rgb": final_rgb,
             "restored_bw_rgb": bw_restored_rgb,
-            "final_masterpiece_rgb": final_masterpiece_rgb,
-            "damage_map_rgb": damage_map_rgb,
-            "heatmap_rgb": heatmap_rgb,
             "resolution_str": f"{orig_w} × {orig_h} px",
             "latency_ms": total_latency_ms,
-            "defect_pct": defect_pct,
-            "damaged_pixel_count": damaged_pixel_count,
-            "sharpness_gain": sharpness_gain,
-            "colorfulness_score": colorfulness_score,
-            "colorfulness_label": colorfulness_label,
-            "raw_ab": out_ab_np,
-            "l_restored": l_restored,
-            "from_cache": False,
         }
 
-        # Cache management
         if len(self._cache) > 32:
             self._cache.pop(next(iter(self._cache)))
         self._cache[cache_key] = result_dict
 
         return result_dict
 
-    # Backward compatibility alias
     def colorize(self, *args, **kwargs) -> Dict:
-        """Alias for restore_and_relive to maintain full backward compatibility."""
         return self.restore_and_relive(*args, **kwargs)
 
 
 def export_image(img_rgb: np.ndarray, format_type: str = "PNG", quality: int = 95) -> str:
-    """Saves and exports image in requested format (PNG, JPEG, WebP) and returns filepath."""
-    fmt = format_type.upper()
-    if fmt in ["JPEG", "JPG"]:
-        ext = "jpg"
-        save_fmt = "JPEG"
-    elif fmt == "WEBP":
-        ext = "webp"
-        save_fmt = "WEBP"
-    else:
-        ext = "png"
-        save_fmt = "PNG"
-
-    filename = f"revivegan_master_restoration.{ext}"
-    pil_img = Image.fromarray(img_rgb)
-    if save_fmt == "JPEG":
-        pil_img.save(filename, format="JPEG", quality=quality, optimize=True)
-    elif save_fmt == "WEBP":
-        pil_img.save(filename, format="WEBP", quality=quality)
-    else:
-        pil_img.save(filename, format="PNG", compress_level=4)
+    """Exports image cleanly as lossless PNG."""
+    filename = "revivegan_restored.png"
+    Image.fromarray(img_rgb).save(filename, format="PNG", compress_level=4)
     return filename
 
 
-# Singleton Engine Instance
 studio_engine = ReviveGANEngine()
 ChromaGANEngine = ReviveGANEngine
+RELIVE_MODES = {}
+PRESETS = RELIVE_MODES
+
